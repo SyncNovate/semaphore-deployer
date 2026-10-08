@@ -134,16 +134,41 @@ type WebhookPropagator struct {
 // empty, the returned propagator is a no-op (logs still emit but no
 // webhook fires).
 func NewWebhookPropagator() *WebhookPropagator {
+	return newWebhookPropagator(
+		os.Getenv(EnvAuditWebhookURL),
+		os.Getenv(EnvAuditHMACKey),
+		os.Getenv(EnvAuditTimeoutMS),
+	)
+}
+
+// NewWebhookPropagatorFromURL is the test-friendly constructor. It
+// takes the URL + key + timeout-ms directly (rather than reading
+// env), so unit tests can override each field independently.
+//
+// SentraOps fork (R-I.1.e).
+func NewWebhookPropagatorFromURL(url string, key string, timeout time.Duration) *WebhookPropagator {
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
 	p := &WebhookPropagator{
-		url: os.Getenv(EnvAuditWebhookURL),
-		key: []byte(os.Getenv(EnvAuditHMACKey)),
+		url:    url,
+		key:    []byte(key),
+		client: &http.Client{Timeout: timeout},
+	}
+	return p
+}
+
+// newWebhookPropagator is the shared constructor that
+// NewWebhookPropagator delegates to.
+func newWebhookPropagator(url, key, timeoutMS string) *WebhookPropagator {
+	p := &WebhookPropagator{
+		url: url,
+		key: []byte(key),
 	}
 	if p.url != "" && len(p.key) > 0 {
 		timeout := 5 * time.Second
-		if raw := os.Getenv(EnvAuditTimeoutMS); raw != "" {
-			// intentionally best-effort — invalid values fall back
-			// to the default rather than disabling the propagator.
-			if d, err := time.ParseDuration(raw + "ms"); err == nil && d > 0 && d < 60*time.Second {
+		if timeoutMS != "" {
+			if d, err := time.ParseDuration(timeoutMS + "ms"); err == nil && d > 0 && d < 60*time.Second {
 				timeout = d
 			}
 		}
@@ -166,6 +191,13 @@ func (p *WebhookPropagator) IsConfigured() bool {
 // log line after the breaker opens.
 func (p *WebhookPropagator) Propagate(event AuditEvent) {
 	if p == nil || !p.IsConfigured() {
+		return
+	}
+	if p.breakerOpen.Load() {
+		// Breaker open: short-circuit to avoid amplifying the
+		// backlog. The platform's anomaly detector picks up the
+		// `audit_propagation_backlog_growing` log line emitted at
+		// threshold-crossing time.
 		return
 	}
 	if event.ID == "" {

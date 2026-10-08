@@ -57,14 +57,36 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 
 	// X-Service-Auth: must be present and valid. We re-verify here
 	// because the TenantBinding middleware skips this prefix.
+	raw := r.Header.Get("X-Service-Auth")
+	if strings.TrimSpace(raw) == "" {
+		helpers.WriteErrorStatus(w, "service_auth_required", http.StatusUnauthorized)
+		return
+	}
 	pem := apimiddleware.PlatformPublicKeyPEM
 	if len(pem) == 0 {
 		helpers.WriteErrorStatus(w, "service_auth_not_configured", http.StatusUnauthorized)
 		return
 	}
-	if _, err := jwt.Verify(r.Header.Get("X-Service-Auth"), pem); err != nil {
+	claims, err := jwt.Verify(raw, pem)
+	if err != nil {
 		helpers.WriteErrorStatus(w, "service_auth_invalid", http.StatusUnauthorized)
 		return
+	}
+	// Drop the verified claims into the request context so the
+	// rest of the handler chain (audit propagation etc.) reads
+	// the same actor the middleware would have published. The
+	// TenantBinding middleware normally handles this for routes
+	// under /api/v1/* + /api/internal/*, but ExecutorAuthMiddleware
+	// does NOT run before /register, so we replicate the publish
+	// here.
+	if claims.ActorID != "" {
+		r = helpers.SetContextValue(r, apimiddleware.ContextKeyActorID, claims.ActorID)
+	}
+	if claims.TenantID != "" {
+		r = helpers.SetContextValue(r, apimiddleware.ContextKeyTenantID, claims.TenantID)
+	}
+	if len(claims.DeploymentZoneIDs) > 0 {
+		r = helpers.SetContextValue(r, apimiddleware.ContextKeyDeploymentZoneIDs, claims.DeploymentZoneIDs)
 	}
 
 	var req RegisterRequest
@@ -72,6 +94,33 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// helpers.Bind is plain json.Decode — gorilla/mux does not honour
+	// the `binding:"required"` tag (that's a gin convention). Manually
+	// enforce the required-field set so a deliberately-truncated body
+	// cannot drive a partially-populated executor row.
+	missing := []string{}
+	if strings.TrimSpace(req.Name) == "" {
+		missing = append(missing, "name")
+	}
+	if strings.TrimSpace(req.TenantID) == "" {
+		missing = append(missing, "tenant_id")
+	}
+	if strings.TrimSpace(req.DeploymentZoneID) == "" {
+		missing = append(missing, "deployment_zone_id")
+	}
+	if strings.TrimSpace(req.Hostname) == "" {
+		missing = append(missing, "hostname")
+	}
+	if strings.TrimSpace(req.ExecutorVersion) == "" {
+		missing = append(missing, "executor_version")
+	}
+	if strings.TrimSpace(req.AnsibleVersion) == "" {
+		missing = append(missing, "ansible_version")
+	}
+	if len(missing) > 0 {
+		helpers.WriteErrorStatus(w, "missing_fields:"+strings.Join(missing, ","), http.StatusBadRequest)
+		return
+	}
 	if len(req.PlatformsSupported) == 0 {
 		helpers.WriteErrorStatus(w, "platforms_required", http.StatusBadRequest)
 		return
