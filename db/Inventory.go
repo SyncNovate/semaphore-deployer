@@ -23,6 +23,12 @@ type Inventory struct {
 	ProjectID int    `db:"project_id" json:"project_id" backup:"-"`
 	Inventory string `db:"inventory" json:"inventory"`
 
+	// SentraOps fork (R-I.1.b): inventories are tenant-scoped (you cannot
+	// share an inventory across tenants). Inherited from the parent project
+	// at create time by the API layer (R-I.1.c); backfilled as `_unknown`
+	// in v2.19.17.
+	TenantID string `db:"tenant_id" json:"tenant_id" binding:"required"`
+
 	// accesses hosts in inventory
 	SSHKeyID *int      `db:"ssh_key_id" json:"ssh_key_id" backup:"-"`
 	SSHKey   AccessKey `db:"-" json:"-" backup:"-"`

@@ -159,13 +159,16 @@ func TestBackup_BackupSecretStorage(t *testing.T) {
       "owner": "vault",
       "storage": "Test",
       "synchronized": false,
+      "tenant_id": "",
       "type": "none"
     }
   ],
   "meta": {
     "alert": false,
+    "deployment_zone_id": "",
     "max_parallel_tasks": 0,
     "name": "Test 1234",
+    "tenant_id": "",
     "type": ""
   },
   "repositories": [],

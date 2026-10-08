@@ -160,6 +160,11 @@ type ObjectProps struct {
 var ErrNotFound = errors.New("no rows in result set")
 var ErrInvalidOperation = errors.New("invalid operation")
 
+// ErrAlreadyExists is returned when an insert violates a unique constraint
+// (e.g. the executor's (tenant_id, deployment_zone_id, hostname) index).
+// SentraOps fork (R-I.1.b).
+var ErrAlreadyExists = errors.New("already exists")
+
 type ValidationError struct {
 	Message string
 }
@@ -485,6 +490,59 @@ type EventManager interface {
 	GetAllEvents(params RetrieveQueryParams) ([]Event, error)
 }
 
+// ExecutorManager handles the customer-side deployment executor entity.
+// Executors are tenant-scoped (NOT project-scoped) — a single executor
+// can claim tasks for any project in its tenant + zone that matches its
+// declared platform support. See
+// docs/architecture/2026-10-07-semaphore-fork-design.md §3.3 + §4.3.
+type ExecutorManager interface {
+	// CreateExecutor inserts a new executor row. Returns the new surrogate
+	// id + the persisted row. The caller must pre-populate TenantID,
+	// DeploymentZoneID, ExecutorID (ULID), RegistrationAt, and Status.
+	// Returns ErrAlreadyExists if the unique index (TenantID, DeploymentZoneID, Hostname)
+	// or the unique ExecutorID is violated.
+	CreateExecutor(executor Executor) (Executor, error)
+
+	// GetExecutor returns the executor by surrogate id. Returns ErrNotFound
+	// if the id does not exist.
+	GetExecutor(executorID int) (Executor, error)
+
+	// GetExecutorByExecutorID returns the executor by its public ULID
+	// (`executor_id` column). Returns ErrNotFound if not present.
+	GetExecutorByExecutorID(executorID string) (Executor, error)
+
+	// GetExecutorsByTenant lists every executor for the given tenant,
+	// filtered by an optional zone (nil = all zones in the tenant).
+	// Used by the admin UI (R-I.9) and by the health-gate logic in R-I.8.
+	GetExecutorsByTenant(tenantID string, zoneID *string) ([]Executor, error)
+
+	// GetClaimableExecutors returns online executors for (tenant, zone) whose
+	// declared platform support includes at least one of the given
+	// platforms. Used by the job-claim endpoint (R-I.1.d) to pick which
+	// executor gets the task assignment notification.
+	GetClaimableExecutors(tenantID string, zoneID string, platforms []string) ([]Executor, error)
+
+	// UpdateExecutor persists the full row. Used by the heartbeat endpoint
+	// (status + last_heartbeat_at), the rename endpoint, and the
+	// affinity-violation counter increment.
+	UpdateExecutor(executor Executor) error
+
+	// DeleteExecutor hard-deletes the row. Used by the operator's
+	// "decommission executor" action (R-I.8).
+	DeleteExecutor(executorID int) error
+
+	// RevokeExecutor sets RevokedAt + RevokeReason atomically. A revoked
+	// executor cannot claim any jobs. Used by the operator's "revoke
+	// executor" action AND by the auto-revoke rule (5/10 min).
+	RevokeExecutor(executorID int, reason string) error
+
+	// IncrementAffinityViolation increments the executor's violation
+	// counter within the 10-minute window. Returns the new count.
+	// Resets the window if it has expired. Returns ErrNotFound if the
+	// executor does not exist.
+	IncrementAffinityViolation(executorID int) (newCount int, err error)
+}
+
 type SecretStorageRepository interface {
 	GetSecretStorages(projectID int) ([]SecretStorage, error)
 	CreateSecretStorage(storage SecretStorage) (SecretStorage, error)
@@ -747,6 +805,19 @@ var GlobalRunnerProps = ObjectProps{
 	DefaultSortingColumn: "id",
 	SortInverted:         true,
 	IsGlobal:             true,
+}
+
+// ExecutorProps describes the executor table for ObjectProps metadata.
+// Note: executors are NOT project-scoped (they are tenant-scoped), so
+// IsGlobal is false and the store methods do their own tenant filtering
+// (the R-I.1.c storage-layer filter wraps the base methods).
+var ExecutorProps = ObjectProps{
+	TableName:            "executor",
+	Type:                 reflect.TypeOf(Executor{}),
+	PrimaryColumnName:    "id",
+	SortableColumns:      []string{"id", "name", "registration_at", "last_heartbeat_at"},
+	DefaultSortingColumn: "id",
+	SortInverted:         true,
 }
 
 var OptionProps = ObjectProps{

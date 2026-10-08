@@ -67,8 +67,8 @@ func (d *SqlDb) UpdateAccessKey(key db.AccessKey) error {
 	var res sql.Result
 
 	var args []any
-	query := "update access_key set name=?"
-	args = append(args, key.Name)
+	query := "update access_key set name=?, tenant_id=?"
+	args = append(args, key.Name, key.TenantID)
 
 	if !key.IgnorePlain {
 		query += ", plain=?"
@@ -114,8 +114,9 @@ func (d *SqlDb) CreateAccessKey(key db.AccessKey) (newKey db.AccessKey, err erro
 				"source_storage_id, "+
 				"source_storage_key, "+
 				"source_storage_type, "+
-				"synchronized) "+
-				"values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				"synchronized, "+
+				"tenant_id) "+
+				"values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			key.Name,
 			key.Type,
 			key.ProjectID,
@@ -127,6 +128,7 @@ func (d *SqlDb) CreateAccessKey(key db.AccessKey) (newKey db.AccessKey, err erro
 			key.SourceStorageKey,
 			key.SourceStorageType,
 			key.Synchronized,
+			key.TenantID,
 		)
 	} else {
 		insertID, err = d.insert(
@@ -143,8 +145,9 @@ func (d *SqlDb) CreateAccessKey(key db.AccessKey) (newKey db.AccessKey, err erro
 				"source_storage_id, "+
 				"source_storage_key, "+
 				"source_storage_type, "+
-				"synchronized) "+
-				"values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				"synchronized, "+
+				"tenant_id) "+
+				"values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			key.Name,
 			key.Type,
 			key.ProjectID,
@@ -157,6 +160,7 @@ func (d *SqlDb) CreateAccessKey(key db.AccessKey) (newKey db.AccessKey, err erro
 			key.SourceStorageKey,
 			key.SourceStorageType,
 			key.Synchronized,
+			key.TenantID,
 		)
 
 	}

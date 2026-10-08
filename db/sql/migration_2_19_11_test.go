@@ -2,6 +2,7 @@ package sql
 
 import (
 	"testing"
+	"time"
 
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/util"
@@ -30,11 +31,21 @@ func TestMigration_2_19_11(t *testing.T) {
 	target := "2.19.2"
 	require.NoError(t, db.Migrate(store, &target))
 
-	proj, err := store.CreateProject(db.Project{Name: "p"})
+	// Seed the project with raw SQL: at v2.19.2 the project table does
+	// not yet have tenant_id / deployment_zone_id (those arrive in
+	// v2.19.17), so we cannot go through store.CreateProject which now
+	// writes those columns. We also have to supply every NOT NULL
+	// column on the v2.19.2 schema: created + name (+ max_parallel_tasks
+	// which has a default).
+	_, err := store.Sql().Exec(
+		"insert into project (name, type, created, max_parallel_tasks) values (?, ?, ?, ?)",
+		"p", "", time.Now().UTC(), 0)
+	require.NoError(t, err)
+	projectID, err := store.Sql().SelectInt("select id from project where name = ?", "p")
 	require.NoError(t, err)
 
 	_, err = store.Sql().Exec(
-		"insert into project__workflow_template (project_id, name) values (?, ?)", proj.ID, "wf")
+		"insert into project__workflow_template (project_id, name) values (?, ?)", projectID, "wf")
 	require.NoError(t, err)
 	workflowID, err := store.Sql().SelectInt("select id from project__workflow_template where name = 'wf'")
 	require.NoError(t, err)
@@ -55,6 +66,6 @@ func TestMigration_2_19_11(t *testing.T) {
 	err = store.Sql().SelectOne(&taskParams,
 		"select * from project__task_params where id = ?", paramsID.Int64)
 	require.NoError(t, err)
-	assert.Equal(t, proj.ID, taskParams.ProjectID)
+	assert.Equal(t, int(projectID), taskParams.ProjectID)
 	assert.Equal(t, []any{"web*", "db"}, taskParams.Params["limit"])
 }

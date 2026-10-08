@@ -31,11 +31,40 @@ This file is the entry point; the actual divergence is split into a series of su
 
 **As of 2026-10-08: this fork is at v2.19.16 with NO divergence yet. R-I.1 baseline landed.**
 
+**As of R-I.1.b: this fork is at v2.19.17 with the data layer divergence. R-I.1.c (enforcement layers) and R-I.1.d (API endpoints) are next.**
+
+### Divergence landed (R-I.1.b)
+
+| File | Change |
+|---|---|
+| `db/sql/migrations/v2.19.17.sql` | NEW. Adds `tenant_id` + `deployment_zone_id` to `project`; adds `tenant_id` to `project__inventory` and `access_key`; creates the new `executor` table. Backfills `_unknown` per design doc §3.4. |
+| `db/sql/migrations/v2.19.17.err.sql` | NEW. Rollback (drops `executor` table + the new columns). |
+| `db/Migration.go` | Adds `2.19.17` to the `commonScripts` list. |
+| `db/Project.go` | Adds `TenantID` + `DeploymentZoneID` fields with `binding:"required"`. |
+| `db/Inventory.go` | Adds `TenantID` field with `binding:"required"`. |
+| `db/AccessKey.go` | Adds `TenantID` field with `binding:"required"`. |
+| `db/Executor.go` | NEW. The customer-side deployment executor model. |
+| `db/ulid.go` | NEW. Self-contained `NewExecutorID()` helper (Crockford-Base32 ULID, no new dep). |
+| `db/Store.go` | Adds `ExecutorManager` interface, `ExecutorProps`, `ErrAlreadyExists`. |
+| `db/sql/SqlDb.go` | Registers the `executor` table with gorp in `Connect()`. |
+| `db/sql/executor.go` | NEW. `ExecutorManager` implementation (CRUD + heartbeat + affinity violation counter + revoke). |
+| `db/sql/project.go` | Updates `CreateProject` + `UpdateProject` to include the new columns. |
+| `db/sql/inventory.go` | Updates `CreateInventory` + `UpdateInventory` to include `tenant_id`. |
+| `db/sql/access_key.go` | Updates `CreateAccessKey` + `UpdateAccessKey` to include `tenant_id` (both branches). |
+| `db/Executor_test.go` | NEW. Model tests: Platforms round-trip, SupportsPlatform case-insensitive, IsRevoked, NewExecutorID format + uniqueness. |
+| `db/sql/executor_test.go` | NEW. Store tests: CRUD, duplicate-hostname + duplicate-executor-id rejected, GetByTenant + zone filter, GetClaimable (status + platforms + revoked), Revoke, IncrementAffinityViolation (not-found, first-time, auto-revoke at threshold, no-op on revoked, window reset). |
+
+The new columns are `NOT NULL DEFAULT '_unknown'`. Existing dev-instance rows backfill to `_unknown`; new rows from the API carry explicit values (enforced in R-I.1.c via `binding:"required"` + request-time middleware). The R-I.2 sweep removes any `_unknown` rows that survive to that point.
+
 ### Planned divergence (R-I sub-chunks)
 
 | Sub-chunk | What changes |
 |---|---|
-| R-I.1 | DB migration `0001_add_tenant_and_zone_and_executor.go`; new `Executor` entity; 3 enforcement layers (request-time middleware, storage-layer filter, executor claim filter); 5 new executor API endpoints; audit propagation webhook (HMAC-SHA256); 15 unit tests |
+| R-I.1.a | Fork baseline + `FORK_NOTES.md` + `api/public/` placeholder. DONE 2026-10-08. |
+| R-I.1.b | DB migration `v2.19.17` + new `Executor` entity + storage-layer wiring. **DONE in this commit.** |
+| R-I.1.c | 3 enforcement layers (request-time middleware + storage-layer filter + executor claim filter). |
+| R-I.1.d | 5 new executor API endpoints (`/api/v1/executor/{register,heartbeat,claim,result,affinity-violation}`) + audit propagation webhook (HMAC-SHA256). |
+| R-I.1.e | 15 unit tests in `db/` + `db/sql/` + `api/`. |
 | R-I.4 | Customer-side deployment executor (lives in `executor/` subdirectory of THIS repo) |
 | R-I.5 | Windows Ansible playbook (PSRP/Kerberos + cert-based WinRM) |
 | R-I.6 | Linux Ansible playbook (SSH + verified host keys) |
@@ -46,7 +75,7 @@ This file is the entry point; the actual divergence is split into a series of su
 - Core deployment engine (Ansible / Terraform / PowerShell / OpenTofu runners)
 - Web UI baseline (tenant-binding is enforced server-side; UI is hidden behind service-to-service mTLS)
 - Project / Task / Template / Inventory / AccessKey / User models (we ADD fields, we do not remove)
-- BoltDB / MySQL / Postgres storage backends
+- MySQL / Postgres / SQLite storage backends (BoltDB was removed upstream in 2.19; we don't reintroduce it)
 - REST API surface (we ADD endpoints, we do not remove)
 
 ## How to build

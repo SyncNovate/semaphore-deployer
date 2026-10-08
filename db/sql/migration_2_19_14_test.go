@@ -34,16 +34,25 @@ func TestMigration_2_19_14_DataSurvivesRebuild(t *testing.T) {
 	// newTemplateTestProject is unusable here: its CreateAccessKey call
 	// writes the task_id/expire_at columns which appear only in 2.20.1,
 	// so seed the access key with SQL matching the 2.19.12 schema.
-	project, err := store.CreateProject(db.Project{Name: "proj"})
+	// Same caveat for the project: at v2.19.12 the project table does
+	// not yet have tenant_id / deployment_zone_id (those arrive in
+	// v2.19.17), so seed the project with raw SQL instead of going
+	// through store.CreateProject. We supply every NOT NULL column on
+	// the v2.19.12 schema.
+	_, err = store.Sql().Exec(
+		"insert into project (name, type, created, max_parallel_tasks) values (?, ?, ?, ?)",
+		"proj", "", time.Now().UTC(), 0)
 	require.NoError(t, err)
-	projectID := project.ID
+	projectID, err := store.Sql().SelectInt("select id from project where name = ?", "proj")
+	require.NoError(t, err)
+	projectIDInt := int(projectID)
 
 	keyID, err := store.insert("id",
 		"insert into access_key (name, type, project_id) values ('key', 'none', ?)", projectID)
 	require.NoError(t, err)
 
 	repo, err := store.CreateRepository(db.Repository{
-		ProjectID: projectID,
+		ProjectID: projectIDInt,
 		Name:      "repo",
 		GitURL:    "https://example.com/repo.git",
 		GitBranch: "main",
@@ -52,7 +61,7 @@ func TestMigration_2_19_14_DataSurvivesRebuild(t *testing.T) {
 	require.NoError(t, err)
 
 	template, err := store.CreateTemplate(db.Template{
-		ProjectID:    projectID,
+		ProjectID:    projectIDInt,
 		RepositoryID: repo.ID,
 		Name:         "tpl",
 		Playbook:     "site.yml",
@@ -61,7 +70,7 @@ func TestMigration_2_19_14_DataSurvivesRebuild(t *testing.T) {
 
 	task, err := store.CreateTask(db.Task{
 		TemplateID: template.ID,
-		ProjectID:  projectID,
+		ProjectID:  projectIDInt,
 		Status:     "success",
 		Playbook:   "site.yml",
 		UserID:     &user.ID,
@@ -90,12 +99,12 @@ func TestMigration_2_19_14_DataSurvivesRebuild(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, user.ID, survivedSession.UserID)
 
-	survivedTask, err := store.GetTask(projectID, task.ID)
+	survivedTask, err := store.GetTask(projectIDInt, task.ID)
 	require.NoError(t, err)
 	require.NotNil(t, survivedTask.UserID)
 	assert.Equal(t, user.ID, *survivedTask.UserID)
 
-	outputs, err := store.GetTaskOutputs(projectID, task.ID, db.RetrieveQueryParams{})
+	outputs, err := store.GetTaskOutputs(projectIDInt, task.ID, db.RetrieveQueryParams{})
 	require.NoError(t, err)
 	assert.Len(t, outputs, 1)
 
@@ -107,7 +116,7 @@ func TestMigration_2_19_14_DataSurvivesRebuild(t *testing.T) {
 	_, err = store.GetSession(user.ID, session.ID)
 	assert.ErrorIs(t, err, db.ErrNotFound)
 
-	survivedTask, err = store.GetTask(projectID, task.ID)
+	survivedTask, err = store.GetTask(projectIDInt, task.ID)
 	require.NoError(t, err)
 	assert.Nil(t, survivedTask.UserID)
 }

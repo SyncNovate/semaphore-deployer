@@ -36,6 +36,11 @@ type AccessKey struct {
 
 	ProjectID *int `db:"project_id" json:"project_id" backup:"-"`
 
+	// SentraOps fork (R-I.1.b): access keys used by executors are tenant-bound.
+	// Inherited from the parent project at create time by the API layer
+	// (R-I.1.c); backfilled as `_unknown` in v2.19.17.
+	TenantID string `db:"tenant_id" json:"tenant_id" binding:"required"`
+
 	// Secret used internally, do not assign this field.
 	// You should use methods SerializeSecret to fill this field.
 	Secret      *string `db:"secret" json:"-" backup:"-"`
