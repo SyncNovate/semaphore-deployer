@@ -37,6 +37,8 @@ This file is the entry point; the actual divergence is split into a series of su
 
 **As of R-I.1.d: the 5 executor endpoints + audit webhook + service-JWT validator land. R-I.1.e (15-test suite surface) is next.**
 
+**As of R-I.1.e: the 15-test surface for design doc §8 lands (9 storage + 12 handler + 5 audit + 3 skip markers for deferred surfaces). The full R-I.1 sub-slice series (a–e) is DONE. The next sub-chunk is R-I.2 in the main `SyncNovate/SentraOps` repo (Runner Deployment Service + persistence + upstream-proxy mTLS handler).**
+
 ### Divergence landed (R-I.1.b)
 
 | File | Change |
@@ -94,6 +96,20 @@ The new columns are `NOT NULL DEFAULT '_unknown'`. Existing dev-instance rows ba
 | `api/router.go` | Mounts `/api/v1/executor/register` (no auth — pre-registration, gated on X-Service-Auth + X-Register-Token inline) and `/api/v1/executor/{heartbeat,claim,result,affinity-violation}` (under `ExecutorAuthMiddleware`). The `TenantBinding` middleware already skips `/api/v1/executor/*` from R-I.1.c, so the executor routes short-circuit straight to executor auth. |
 | `FORK_NOTES.md` | R-I.1.d divergence row + planned sub-chunks updated. |
 
+### Divergence landed (R-I.1.e)
+
+| File | Change |
+|---|---|
+| `db/sql/executor_claim_test.go` | NEW. 9 storage tests for the R-I.1.d surface: `TestExecutor_Claim_AtomicClaim` (UPDATE 0-rows + follow-up SELECT distinguishes `ErrAlreadyClaimed` from `ErrNotFound`), `GetClaimableTasksForTenantAndZone` (only matching tenant + zone; wrong tenant → empty; wrong zone → empty; partial-index `idx_task_claimable` excluded already-claimed tasks), `HeartbeatExecutor_UpdatesLastSeen` (timestamp advances on success + `ErrExecutorRevoked` on revoked), `RecordExecutorTaskResult_NotClaimHolder` (write rejected when `claimed_by` mismatches). |
+| `api/executor/executor_test.go` | NEW. 12 handler tests: register requires `X-Register-Token` + non-empty `X-Service-Auth`; service-JWT verified via ECDSA P-256 keypair (fail-closed when `PlatformPublicKeyPEM` empty); tenant + deployment-zone-ids required on the body; happy path with verified-JWT `actor_id` propagated into request context. `ExecutorAuthMiddleware` collapses all 401s to one generic code (sentinel errors distinguish in logs only), with `revoked → 403` distinct. Heartbeat / claim / result / affinity-violation paths covered end-to-end. Auto-revoke at 5/10 min. |
+| `api/executor/audit_test.go` | NEW. 5 audit tests: `TestWebhookPropagator_HMACEnvelope` (canonical-JSON body → `X-Audit-Signature: sha256=<hex>` round-trip), no-op when `SENTRAOPS_AUDIT_WEBHOOK_URL` unset, circuit-breaker trips at 5 consecutive failures + short-circuits subsequent calls, success closes the breaker, `verifyHMAC` + `newAuditID` uniqueness across 1000 calls. |
+| `api/executor/skipped_test.go` | NEW. 3 skip markers documenting deferred surfaces: `TestServiceToService_RequiresMTLS` (R-I.2 — mTLS between the platform BE and the fork replaces the placeholder `X-Service-Auth` bearer once landed), `TestExecutor_Offline_AfterTimeout` (R-I.8 — sweeper marks executors `OFFLINE` after heartbeat timeout), `TestGetProject_ZoneListFilter` (project zone-list filter is covered upstream in the design doc §3.6 + the test for `GetClaimableTasksForTenantAndZone`). |
+| `api/executor/handlers.go` | Hardening pass: `/register` now requires non-empty `X-Service-Auth` (was implicit JWT verify); manual required-field validation in every handler (gorilla/mux + `helpers.Bind` does NOT honour `binding:"required"`); verified-JWT claims published into request context for `actor_id` propagation through the audit chain. |
+| `api/executor/audit.go` | Added `NewWebhookPropagatorFromURL` test helper; added breaker short-circuit at the top of `Propagate` (was previously only a side-effect of `recordFailure`, so a closed-but-failing breaker still fired HTTP requests — caught by the audit test under `./...`). |
+| `FORK_NOTES.md` | R-I.1.e divergence row + planned sub-chunks updated. |
+
+**After R-I.1.e the full R-I.1 sub-slice series is DONE.** The fork is now a tenant + zone-bound deployment engine with 5 executor API endpoints, an audit propagation webhook, a platform-BE JWT validator, and the 15-test surface for design doc §8. The next sub-chunk is R-I.2 in the main `SyncNovate/SentraOps` repo (Runner Deployment Service + persistence + upstream-proxy mTLS handler).
+
 ### Planned divergence (R-I sub-chunks)
 
 | Sub-chunk | What changes |
@@ -102,7 +118,8 @@ The new columns are `NOT NULL DEFAULT '_unknown'`. Existing dev-instance rows ba
 | R-I.1.b | DB migration `v2.19.17` + new `Executor` entity + storage-layer wiring. DONE 2026-10-08. |
 | R-I.1.c | 3 enforcement layers (request-time middleware + storage-layer filter + executor claim filter). DONE 2026-10-08 (storage filter + middleware only; executor claim API endpoint is R-I.1.d). |
 | R-I.1.d | 5 new executor API endpoints + audit propagation webhook + platform-BE JWT validator. **DONE in this commit.** |
-| R-I.1.e | 15 unit tests in `db/` + `db/sql/` + `api/`. |
+| R-I.1.e | 15 unit tests in `db/` + `db/sql/` + `api/`. **DONE in this commit.** |
+| R-I.2 | Runner Deployment Service (lives in the main `SyncNovate/SentraOps` repo, not this fork) |
 | R-I.4 | Customer-side deployment executor (lives in `executor/` subdirectory of THIS repo) |
 | R-I.5 | Windows Ansible playbook (PSRP/Kerberos + cert-based WinRM) |
 | R-I.6 | Linux Ansible playbook (SSH + verified host keys) |
