@@ -22,6 +22,7 @@ import (
 	"github.com/semaphoreui/semaphore/pkg/tz"
 	log "github.com/sirupsen/logrus"
 
+	"github.com/semaphoreui/semaphore/api/executor"
 	"github.com/semaphoreui/semaphore/api/middleware"
 	"github.com/semaphoreui/semaphore/api/runners"
 
@@ -168,6 +169,31 @@ func Route(
 	runnersAPI.Path("").HandlerFunc(runnerController.GetRunner).Methods("GET", "HEAD")
 	runnersAPI.Path("").HandlerFunc(runnerController.UpdateRunner).Methods("PUT")
 	runnersAPI.Path("").HandlerFunc(runners.UnregisterRunner).Methods("DELETE")
+
+	//
+	// Executor (customer-side deployment executor) — R-I.1.d.
+	//
+	// /api/v1/executor/* sits OUTSIDE the authenticated API tree. The
+	// executor authenticates with its bearer token
+	// (X-Executor-Token, looked up by SHA-256 hash) for every
+	// authenticated endpoint; the /register endpoint instead
+	// authenticates via the platform-BE service JWT
+	// (X-Service-Auth) + a one-shot X-Register-Token.
+	//
+	// Skip note: middleware.TenantBinding's isTenantUnboundRoute
+	// matches /api/v1/executor/*, so the tenant-scope middleware
+	// does not run on these routes. The ExecutorAuthMiddleware
+	// establishes executor identity instead.
+	executorAPI := publicAPIRouter.PathPrefix("/v1/executor").Subrouter()
+	executorAPI.Use(JSONMiddleware)
+	executorAPI.HandleFunc("", executor.RegisterHandler).Methods("POST")
+
+	executorAuthedAPI := publicAPIRouter.PathPrefix("/v1/executor").Subrouter()
+	executorAuthedAPI.Use(JSONMiddleware, executor.ExecutorAuthMiddleware)
+	executorAuthedAPI.HandleFunc("/heartbeat", executor.HeartbeatHandler).Methods("POST")
+	executorAuthedAPI.HandleFunc("/claim", executor.ClaimHandler).Methods("POST")
+	executorAuthedAPI.HandleFunc("/result", executor.ResultHandler).Methods("POST")
+	executorAuthedAPI.HandleFunc("/affinity-violation", executor.AffinityViolationHandler).Methods("POST")
 
 	publicWebHookRouter := r.PathPrefix(webPath + "api").Subrouter()
 	publicWebHookRouter.Use(StoreMiddleware, JSONMiddleware)

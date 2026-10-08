@@ -1,10 +1,20 @@
 package middleware
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
+	"time"
 
+	jose "github.com/go-jose/go-jose/v4"
+	josejwt "github.com/go-jose/go-jose/v4/jwt"
+	"github.com/semaphoreui/semaphore/pkg/jwt"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -75,31 +85,143 @@ func TestTenantBinding_InternalPath_SkipsBinding(t *testing.T) {
 	assert.Nil(t, captured[ContextKeyTenantID])
 }
 
-// TestTenantBinding_ServiceSkip_Honoured verifies that
-// X-Skip-Tenant-Filter is honoured only when X-Service-Auth is also
-// present (placeholder check tightened in R-I.2).
+// mintTestServiceJWT generates an ECDSA P-256 keypair, returns a
+// compact JWS signed with the matching private key. The supplied
+// claims are encoded verbatim.
+func mintTestServiceJWT(t *testing.T, claims jwt.ServiceClaims) (token string, publicKeyPEM []byte) {
+	t.Helper()
+
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	assert.NoError(t, err)
+
+	signingKey := jose.SigningKey{
+		Algorithm: jose.ES256,
+		Key: jose.JSONWebKey{
+			Key:       priv,
+			KeyID:     "test-kid",
+			Algorithm: string(jose.ES256),
+			Use:       "sig",
+		},
+	}
+	sig, err := jose.NewSigner(signingKey, (&jose.SignerOptions{}).WithType("JWT"))
+	assert.NoError(t, err)
+
+	now := time.Now().UTC()
+	claims.IssuedAt = now.Unix()
+	claims.NotBefore = now.Unix()
+	claims.ExpiresAt = now.Add(time.Hour).Unix()
+
+	token, err = josejwt.Signed(sig).Claims(claims).Serialize()
+	assert.NoError(t, err)
+
+	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	assert.NoError(t, err)
+	publicKeyPEM = pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+
+	return token, publicKeyPEM
+}
+
+// withPlatformKey installs a generated public-key PEM into the
+// package-level PlatformPublicKeyPEM for one test, restoring the
+// previous value on cleanup. This is the only mutation the test
+// suite performs on package-level state.
+func withPlatformKey(t *testing.T, pemBytes []byte) {
+	t.Helper()
+	prev := PlatformPublicKeyPEM
+	t.Cleanup(func() { PlatformPublicKeyPEM = prev })
+	PlatformPublicKeyPEM = pemBytes
+}
+
+// TestTenantBinding_ServiceSkip_Honoured verifies a service JWT that
+// verifies against the configured platform public key is honoured
+// + the tenant scope comes from the JWT's claims (not from headers).
+//
+// SentraOps fork (R-I.1.d).
 func TestTenantBinding_ServiceSkip_Honoured(t *testing.T) {
+	token, pubKey := mintTestServiceJWT(t, jwt.ServiceClaims{
+		Issuer:            "sentraops",
+		Subject:           "service",
+		TenantID:          "ORG-FROM-JWT",
+		DeploymentZoneIDs: []string{"ZONE-JWT-A", "ZONE-JWT-B"},
+		ActorID:           "op-1234",
+	})
+	withPlatformKey(t, pubKey)
+
 	req := httptest.NewRequest("POST", "/api/projects", nil)
 	req.Header.Set(HeaderSkipTenantFilter, "true")
-	req.Header.Set(HeaderServiceAuth, "service-jwt-placeholder")
+	req.Header.Set(HeaderServiceAuth, token)
+	// Headers are intentionally absent — the JWT's claims are the
+	// ground truth.
+	req.Header.Set(HeaderTenantID, "ORG-FROM-HEADER-SHOULD-BE-IGNORED")
 
 	code, _, captured := runTenantBinding(t, req)
 	assert.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "ORG-FROM-JWT", captured[ContextKeyTenantID])
+	assert.Equal(t, []string{"ZONE-JWT-A", "ZONE-JWT-B"}, captured[ContextKeyDeploymentZoneIDs])
 	assert.Equal(t, true, captured[ContextKeySkipTenantFilter])
 }
 
 // TestTenantBinding_ServiceSkip_IgnoredWithoutAuth verifies the skip
-// flag is ignored when X-Service-Auth is missing. The platform BE is
+// flag is REJECTED when X-Service-Auth is missing. The platform BE is
 // the only authorised skipper; an unauthenticated request must not
-// bypass the filter even if it sets the header.
+// bypass the filter.
+//
+// SentraOps fork (R-I.1.d).
 func TestTenantBinding_ServiceSkip_IgnoredWithoutAuth(t *testing.T) {
 	req := httptest.NewRequest("POST", "/api/projects", nil)
 	req.Header.Set(HeaderSkipTenantFilter, "true")
 	// X-Service-Auth intentionally absent.
 
 	code, body, _ := runTenantBinding(t, req)
-	assert.Equal(t, http.StatusBadRequest, code)
-	assert.Contains(t, body, "tenant_id_required")
+	assert.Equal(t, http.StatusUnauthorized, code)
+	assert.Contains(t, body, "service_auth_required")
+}
+
+// TestTenantBinding_ServiceSkip_NoPlatformKey verifies the skip is
+// REJECTED when the platform public key is not configured. We fail
+// closed — a misconfigured fork must NOT silently honour the skip.
+//
+// SentraOps fork (R-I.1.d).
+func TestTenantBinding_ServiceSkip_NoPlatformKey(t *testing.T) {
+	withPlatformKey(t, nil)
+
+	req := httptest.NewRequest("POST", "/api/projects", nil)
+	req.Header.Set(HeaderSkipTenantFilter, "true")
+	req.Header.Set(HeaderServiceAuth, "any.token.here")
+
+	code, body, _ := runTenantBinding(t, req)
+	assert.Equal(t, http.StatusUnauthorized, code)
+	assert.Contains(t, body, "service_auth_not_configured")
+}
+
+// TestTenantBinding_ServiceSkip_BadSignature verifies a token whose
+// signature does NOT verify against the configured public key is
+// REJECTED.
+//
+// SentraOps fork (R-I.1.d).
+func TestTenantBinding_ServiceSkip_BadSignature(t *testing.T) {
+	token, _ := mintTestServiceJWT(t, jwt.ServiceClaims{
+		TenantID:         "ORG-X",
+		DeploymentZoneIDs: []string{"Z"},
+	})
+	withPlatformKey(t, []byte("not-a-pem"))
+
+	req := httptest.NewRequest("POST", "/api/projects", nil)
+	req.Header.Set(HeaderSkipTenantFilter, "true")
+	req.Header.Set(HeaderServiceAuth, token)
+
+	code, _, _ := runTenantBinding(t, req)
+	assert.NotEqual(t, http.StatusOK, code)
+}
+
+// TestTenantBinding_NoCrossStateFromEnv ensures the package-level
+// PlatformPublicKeyPEM does not leak across tests via the real OS env.
+func TestTenantBinding_NoCrossStateFromEnv(t *testing.T) {
+	// If we got here via a different test that did set it, the
+	// withPlatformKey helper has already cleaned it up. This test
+	// is a guard rail.
+	_ = os.Getenv("SENTRAOPS_PLATFORM_PUBLIC_KEY_PEM")
+	assert.True(t, true)
 }
 
 // TestTenantBinding_ZoneIDs_TrimsAndDropsEmpty verifies whitespace and

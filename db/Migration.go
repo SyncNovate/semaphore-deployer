@@ -136,6 +136,9 @@ func GetMigrations(dialect string) []Migration {
 		// SentraOps fork divergence starts here (R-I.1.b):
 		// tenant + zone binding columns + new executor entity.
 		{Version: "2.19.17"},
+		// SentraOps fork (R-I.1.d): executor claim tracking on `task`
+		// so the deployment executor can atomically pick up tasks.
+		{Version: "2.19.18"},
 	}
 
 	return append(initScripts, commonScripts...)

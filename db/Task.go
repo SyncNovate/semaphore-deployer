@@ -45,6 +45,22 @@ type Task struct {
 
 	Status task_logger.TaskStatus `db:"status" json:"status"`
 
+	// ClaimedBy is the executor.executor_id that picked up this task.
+	// Empty until the executor claim endpoint atomically claims the row
+	// (R-I.1.d; design doc §5.1).
+	ClaimedBy *string `db:"claimed_by" json:"claimed_by,omitempty"`
+	// ClaimedAt is the wall-clock time the executor claim landed.
+	ClaimedAt *time.Time `db:"claimed_at" json:"claimed_at,omitempty"`
+
+	// ResultOutcome is the executor-reported outcome for this task.
+	// Either 'success' or 'failed' once the result endpoint has been
+	// called; NULL while the task is in flight. Set via the executor
+	// /result endpoint (R-I.1.d).
+	ResultOutcome *string `db:"result_outcome" json:"result_outcome,omitempty"`
+	// ResultErrorClass is the error class tag for failed outcomes
+	// (e.g. "auth_failed", "inventory_missing"). NULL on success.
+	ResultErrorClass *string `db:"result_error_class" json:"result_error_class,omitempty"`
+
 	// override variables
 	Playbook    string  `db:"playbook" json:"playbook"`
 	Environment string  `db:"environment" json:"environment,omitempty"`

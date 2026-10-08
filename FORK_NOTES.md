@@ -33,7 +33,9 @@ This file is the entry point; the actual divergence is split into a series of su
 
 **As of R-I.1.b: this fork is at v2.19.17 with the data layer divergence. R-I.1.c (enforcement layers) and R-I.1.d (API endpoints) are next.**
 
-**As of R-I.1.c: the storage-layer filter + request-time middleware land. R-I.1.d (the executor claim API + the platform-BE JWT validator for X-Skip-Tenant-Filter) is next.**
+**As of R-I.1.c: the storage-layer filter + request-time middleware land. R-I.1.d (the executor claim API + the platform-BE JWT validator for X-Skip-Tenant-Filter) was next.**
+
+**As of R-I.1.d: the 5 executor endpoints + audit webhook + service-JWT validator land. R-I.1.e (15-test suite surface) is next.**
 
 ### Divergence landed (R-I.1.b)
 
@@ -72,14 +74,34 @@ This file is the entry point; the actual divergence is split into a series of su
 
 The new columns are `NOT NULL DEFAULT '_unknown'`. Existing dev-instance rows backfill to `_unknown`; new rows from the API carry explicit values (enforced in R-I.1.c via `binding:"required"` + request-time middleware). The R-I.2 sweep removes any `_unknown` rows that survive to that point.
 
+### Divergence landed (R-I.1.d)
+
+| File | Change |
+|---|---|
+| `db/sql/migrations/v2.19.18.sql` | NEW. Adds `claimed_by` + `claimed_at` + `result_outcome` + `result_error_class` columns to `task`, plus a partial index `idx_task_claimable` (status, claimed_by, claimed_at) `WHERE claimed_by IS NULL`. |
+| `db/sql/migrations/v2.19.18.err.sql` | NEW. Rollback (drops the new task columns + the index). |
+| `db/Migration.go` | Adds `2.19.18` to the `commonScripts` list. |
+| `db/Task.go` | Adds `ClaimedBy` + `ClaimedAt` + `ResultOutcome` + `ResultErrorClass` fields to the `db.Task` model. |
+| `db/Store.go` | Extends `ExecutorManager` with `GetExecutorByTokenHash`, `HeartbeatExecutor`, `GetClaimableTasksForTenantAndZone`, `ClaimTask`, `RecordExecutorTaskResult`. New sentinel errors: `ErrAlreadyClaimed`, `ErrExecutorRevoked`, `ErrAffinityViolation`, `ErrExecutorTokenExpired`. |
+| `db/sql/executor.go` | Implements the 5 new methods. `ClaimTask` is the atomic CAS update (UPDATE ... WHERE id=? AND claimed_by IS NULL → returns `ErrAlreadyClaimed` on race lost). `HeartbeatExecutor` returns `ErrExecutorRevoked` on a revoked executor. `IncrementAffinityViolation` carries the existing 5/10-min auto-revoke logic (R-I.1.b). |
+| `db/sql/migration_2_19_14_test.go` | Seeds the task via raw SQL instead of `store.CreateTask` — the gorp-mapped Insert path includes every `db:` tag, which references the post-R-I.1.d task columns that don't exist at v2.19.12. Mirrors the existing pattern used for project + access_key seeding. |
+| `pkg/jwt/verifier.go` | NEW. `Verify(token, publicKeyPEM)` parses a compact JWS and returns `*ServiceClaims{Issuer, Subject, Audience, ExpiresAt, NotBefore, IssuedAt, TenantID, DeploymentZoneIDs, ActorID}`. Accepts Ed25519 + ECDSA P-256 + RSA keys. Sentinel errors: `ErrInvalidToken`, `ErrTokenExpired`, `ErrKeyUnsupported`, `ErrKeyUnparseable` (all collapsed to the same generic 401 by callers). |
+| `api/middleware/tenant_binding.go` | Now actually verifies the service JWT via `jwt.Verify`, requires the platform public key in `middleware.PlatformPublicKeyPEM`, and uses the JWT's `tenant_id` + `deployment_zone_ids` claims as the bound tenant scope. New context key `ContextKeyActorID` carries the operator id the BE acts on behalf of (audit propagation). Fail-closed on missing key, missing header, bad signature, or expiry. |
+| `api/middleware/tenant_binding_test.go` | 4 new tests using a real ECDSA keypair + JWT: `_ServiceSkip_Honoured` (claims drive tenant scope), `_ServiceSkip_IgnoredWithoutAuth` (401 + `service_auth_required`), `_ServiceSkip_NoPlatformKey` (401 + `service_auth_not_configured` — fail-closed), `_ServiceSkip_BadSignature` (rejected). |
+| `api/executor/controller.go` | NEW. `ExecutorAuthMiddleware` (SHA-256-hashed `X-Executor-Token` → executor row → context). `mintToken` (32 bytes crypto/rand → base64 URL-safe), `hashTokenHex` (SHA-256 → hex). |
+| `api/executor/audit.go` | NEW. `WebhookPropagator` HMAC-SHA256 envelope over `SENTRAOPS_AUDIT_WEBHOOK_URL` with `SENTRAOPS_AUDIT_HMAC_KEY`. FailureThreshold=5 consecutive failures trips the breaker and emits the design-doc `audit_propagation_backlog_growing` audit event. Headers: `X-Audit-Signature: sha256=<hex>`, `X-Audit-Timestamp`, `X-Audit-Id`, `X-Audit-Event`. |
+| `api/executor/handlers.go` | NEW. 5 endpoint handlers: `RegisterHandler` (requires X-Register-Token + X-Service-Auth verified JWT, mints + returns the bearer plaintext exactly once), `HeartbeatHandler`, `ClaimHandler` (atomic per-task CAS; affinity filter enforces tenant+zone match before claiming any task; `ErrExecutorRevoked` → 403), `ResultHandler` (only the claim holder may write the result), `AffinityViolationHandler` (increments the violation counter; the existing `IncrementAffinityViolation` auto-revokes at 5 in 10 min and emits `executor.auto_revoke`). Every audit-relevant event propagates through the webhook. |
+| `api/router.go` | Mounts `/api/v1/executor/register` (no auth — pre-registration, gated on X-Service-Auth + X-Register-Token inline) and `/api/v1/executor/{heartbeat,claim,result,affinity-violation}` (under `ExecutorAuthMiddleware`). The `TenantBinding` middleware already skips `/api/v1/executor/*` from R-I.1.c, so the executor routes short-circuit straight to executor auth. |
+| `FORK_NOTES.md` | R-I.1.d divergence row + planned sub-chunks updated. |
+
 ### Planned divergence (R-I sub-chunks)
 
 | Sub-chunk | What changes |
 |---|---|
 | R-I.1.a | Fork baseline + `FORK_NOTES.md` + `api/public/` placeholder. DONE 2026-10-08. |
 | R-I.1.b | DB migration `v2.19.17` + new `Executor` entity + storage-layer wiring. DONE 2026-10-08. |
-| R-I.1.c | 3 enforcement layers (request-time middleware + storage-layer filter + executor claim filter). **DONE in this commit** (storage filter + middleware only; executor claim API endpoint is R-I.1.d). |
-| R-I.1.d | 5 new executor API endpoints (`/api/v1/executor/{register,heartbeat,claim,result,affinity-violation}`) + audit propagation webhook (HMAC-SHA256) + the platform-BE JWT validator for `X-Skip-Tenant-Filter`. |
+| R-I.1.c | 3 enforcement layers (request-time middleware + storage-layer filter + executor claim filter). DONE 2026-10-08 (storage filter + middleware only; executor claim API endpoint is R-I.1.d). |
+| R-I.1.d | 5 new executor API endpoints + audit propagation webhook + platform-BE JWT validator. **DONE in this commit.** |
 | R-I.1.e | 15 unit tests in `db/` + `db/sql/` + `api/`. |
 | R-I.4 | Customer-side deployment executor (lives in `executor/` subdirectory of THIS repo) |
 | R-I.5 | Windows Ansible playbook (PSRP/Kerberos + cert-based WinRM) |

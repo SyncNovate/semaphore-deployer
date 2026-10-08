@@ -165,6 +165,30 @@ var ErrInvalidOperation = errors.New("invalid operation")
 // SentraOps fork (R-I.1.b).
 var ErrAlreadyExists = errors.New("already exists")
 
+// ErrAlreadyClaimed is returned by the executor-claim CAS update when the
+// target task was claimed by another executor between the SELECT and the
+// UPDATE (R-I.1.d). Callers should treat this as a non-fatal "race lost"
+// signal and move to the next candidate.
+var ErrAlreadyClaimed = errors.New("task already claimed by another executor")
+
+// ErrExecutorRevoked is returned by the claim + heartbeat endpoints when
+// the authenticated executor has been permanently rejected (auto-revoked
+// on threshold or operator-revoked). Per design doc §5.1, a revoked
+// executor is signalled with 403 + `executor_revoked` so the executor's
+// self-diagnostic + the platform's anomaly detection can react.
+var ErrExecutorRevoked = errors.New("executor is revoked")
+
+// ErrAffinityViolation is returned by the claim endpoint when the
+// executor's request tenant+zone does not match its registered bind.
+// Per design doc §5.1, the audit row + 403 is the documented exception
+// to the 404-not-403 rule (it must signal "out of bounds" to drive
+// the executor's self-diagnostic + the platform's anomaly detection).
+var ErrAffinityViolation = errors.New("executor tenant+zone affinity violation")
+
+// ErrExecutorTokenExpired is returned by the executor auth middleware
+// when the stored token's expiry timestamp has passed.
+var ErrExecutorTokenExpired = errors.New("executor auth token expired")
+
 type ValidationError struct {
 	Message string
 }
@@ -572,6 +596,40 @@ type ExecutorManager interface {
 	// Resets the window if it has expired. Returns ErrNotFound if the
 	// executor does not exist.
 	IncrementAffinityViolation(executorID int) (newCount int, err error)
+
+	// GetClaimableTasksForTenantAndZone returns up to maxCount tasks
+	// that the deployment executor for the given tenant + zone is
+	// allowed to pick up. The executor's supported platforms are
+	// intersected with the inventory's declared platform. R-I.1.d.
+	GetClaimableTasksForTenantAndZone(tenantID string, zoneID string, maxCount int, platforms []string) ([]Task, error)
+
+	// ClaimTask is the atomic compare-and-set claim. Updates the row's
+	// claimed_by + claimed_at columns IF claimed_by is currently NULL.
+	// Returns ErrAlreadyClaimed if the row was claimed between the
+	// list and the CAS. R-I.1.d.
+	ClaimTask(taskID int, executorID string) (claimed bool, err error)
+
+	// RecordExecutorTaskResult records the executor's reported outcome
+	// for a claimed task. Returns ErrInvalidOperation if the task was
+	// not claimed by this executor (security: a poisoned executor
+	// cannot reset another's claim). R-I.1.d.
+	RecordExecutorTaskResult(taskID int, executorID string, outcome string, errorClass string) error
+
+	// GetExecutorByTokenHash looks up the executor whose stored
+	// auth_token_hash matches the supplied SHA-256 hex digest of the
+	// caller-supplied bearer token. Returns ErrNotFound for empty
+	// hashes (the executor has not yet registered a token) AND for
+	// tokens that do not match any row. Used by the
+	// /api/v1/executor/{heartbeat,claim,result,affinity-violation}
+	// auth middleware (R-I.1.d).
+	GetExecutorByTokenHash(tokenHashHex string) (Executor, error)
+
+	// HeartbeatExecutor is the bulk-update heartbeat path used by the
+	// /api/v1/executor/heartbeat endpoint. Updates status +
+	// last_heartbeat_at + the version fields in a single UPDATE.
+	// Returns ErrExecutorRevoked if the executor has been revoked
+	// (caller should not retry). R-I.1.d.
+	HeartbeatExecutor(executorID string, status string, executorVersion string, ansibleVersion string, activeJobCount int) (Executor, error)
 }
 
 type SecretStorageRepository interface {
@@ -635,6 +693,7 @@ type Store interface {
 	ViewManager
 	RunnerManager
 	EventManager
+	ExecutorManager
 	SecretStorageRepository
 	SecretSyncRepository
 	RoleRepository

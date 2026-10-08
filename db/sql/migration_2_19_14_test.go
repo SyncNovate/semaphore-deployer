@@ -39,6 +39,14 @@ func TestMigration_2_19_14_DataSurvivesRebuild(t *testing.T) {
 	// v2.19.17), so seed the project with raw SQL instead of going
 	// through store.CreateProject. We supply every NOT NULL column on
 	// the v2.19.12 schema.
+	//
+	// Same caveat for the task: at v2.19.12 the task table does not
+	// yet have claimed_by / claimed_at / result_outcome /
+	// result_error_class (those arrive in v2.19.18, R-I.1.d), so seed
+	// the task with raw SQL instead of going through
+	// store.CreateTask. The gorp mapper auto-includes every db-tagged
+	// field on Task — including the post-R-I.1.d claim columns —
+	// which would error out against the v2.19.12 schema.
 	_, err = store.Sql().Exec(
 		"insert into project (name, type, created, max_parallel_tasks) values (?, ?, ?, ?)",
 		"proj", "", time.Now().UTC(), 0)
@@ -68,24 +76,23 @@ func TestMigration_2_19_14_DataSurvivesRebuild(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	task, err := store.CreateTask(db.Task{
-		TemplateID: template.ID,
-		ProjectID:  projectIDInt,
-		Status:     "success",
-		Playbook:   "site.yml",
-		UserID:     &user.ID,
-		Created:    now,
-	}, 0)
+	taskID, err := store.insert("id",
+		"insert into task (template_id, project_id, status, playbook, environment, message, commit_message, user_id, created) "+
+			"values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		template.ID, projectIDInt, "success", "site.yml", "", "", "", user.ID, now.UTC())
 	require.NoError(t, err)
+	taskIDInt := int(taskID)
 
 	_, err = store.CreateTaskOutput(db.TaskOutput{
-		TaskID: task.ID,
+		TaskID: taskIDInt,
 		Time:   now,
 		Output: "ok",
 	})
 	require.NoError(t, err)
 
-	// Apply the remaining migrations (2.19.14 rebuilds session and task).
+	// Apply the remaining migrations (2.19.14 rebuilds session and task;
+	// v2.19.17 adds executor + tenant columns; v2.19.18 adds task claim
+	// tracking — R-I.1.d).
 	require.NoError(t, db.Migrate(store, nil))
 
 	// The rebuild runs with foreign_keys=OFF, so make sure it left no
@@ -99,12 +106,12 @@ func TestMigration_2_19_14_DataSurvivesRebuild(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, user.ID, survivedSession.UserID)
 
-	survivedTask, err := store.GetTask(projectIDInt, task.ID)
+	survivedTask, err := store.GetTask(projectIDInt, taskIDInt)
 	require.NoError(t, err)
 	require.NotNil(t, survivedTask.UserID)
 	assert.Equal(t, user.ID, *survivedTask.UserID)
 
-	outputs, err := store.GetTaskOutputs(projectIDInt, task.ID, db.RetrieveQueryParams{})
+	outputs, err := store.GetTaskOutputs(projectIDInt, taskIDInt, db.RetrieveQueryParams{})
 	require.NoError(t, err)
 	assert.Len(t, outputs, 1)
 
@@ -116,7 +123,7 @@ func TestMigration_2_19_14_DataSurvivesRebuild(t *testing.T) {
 	_, err = store.GetSession(user.ID, session.ID)
 	assert.ErrorIs(t, err, db.ErrNotFound)
 
-	survivedTask, err = store.GetTask(projectIDInt, task.ID)
+	survivedTask, err = store.GetTask(projectIDInt, taskIDInt)
 	require.NoError(t, err)
 	assert.Nil(t, survivedTask.UserID)
 }
