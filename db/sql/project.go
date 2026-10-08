@@ -122,3 +122,61 @@ func (d *SqlDb) UpdateProject(project db.Project) error {
 		project.ID)
 	return err
 }
+
+// GetProjectForTenant returns the project only if its tenant_id matches
+// the supplied tenantID. On a cross-tenant read it returns ErrNotFound
+// (not 403) so the operator cannot probe for foreign-tenant resource
+// existence — per design doc §4.2 + decision 4.
+//
+// SentraOps fork (R-I.1.c).
+func (d *SqlDb) GetProjectForTenant(projectID int, tenantID string) (db.Project, error) {
+	project, err := d.GetProject(projectID)
+	if err != nil {
+		return db.Project{}, err
+	}
+	if project.TenantID != tenantID {
+		return db.Project{}, db.ErrNotFound
+	}
+	return project, nil
+}
+
+// GetProjectsForTenant lists every project whose tenant_id matches
+// tenantID, ordered by name. This is the operator-scoped equivalent
+// of GetAllProjects; the platform-BE service-to-service path uses
+// GetAllProjects (with X-Skip-Tenant-Filter set after mTLS validation).
+func (d *SqlDb) GetProjectsForTenant(tenantID string) ([]db.Project, error) {
+	query, args, err := squirrel.Select("p.*").
+		From("project as p").
+		Where("p.tenant_id=?", tenantID).
+		OrderBy("p.name").
+		Limit(200).
+		ToSql()
+	if err != nil {
+		return nil, err
+	}
+
+	var projects []db.Project
+	_, err = d.selectAll(&projects, query, args...)
+	return projects, err
+}
+
+// UpdateProjectForTenant updates the project only if its tenant_id
+// matches tenantID. Returns ErrNotFound on cross-tenant write.
+func (d *SqlDb) UpdateProjectForTenant(project db.Project, tenantID string) error {
+	// Defense in depth: verify the project's tenant before issuing the
+	// UPDATE so a cross-tenant attempt cannot succeed even if a handler
+	// forgets to set the right project ID.
+	if _, err := d.GetProjectForTenant(project.ID, tenantID); err != nil {
+		return err
+	}
+	return d.UpdateProject(project)
+}
+
+// DeleteProjectForTenant deletes the project only if its tenant_id
+// matches tenantID. Returns ErrNotFound on cross-tenant delete.
+func (d *SqlDb) DeleteProjectForTenant(projectID int, tenantID string) error {
+	if _, err := d.GetProjectForTenant(projectID, tenantID); err != nil {
+		return err
+	}
+	return d.DeleteProject(projectID)
+}

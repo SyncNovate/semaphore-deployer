@@ -33,6 +33,8 @@ This file is the entry point; the actual divergence is split into a series of su
 
 **As of R-I.1.b: this fork is at v2.19.17 with the data layer divergence. R-I.1.c (enforcement layers) and R-I.1.d (API endpoints) are next.**
 
+**As of R-I.1.c: the storage-layer filter + request-time middleware land. R-I.1.d (the executor claim API + the platform-BE JWT validator for X-Skip-Tenant-Filter) is next.**
+
 ### Divergence landed (R-I.1.b)
 
 | File | Change |
@@ -54,6 +56,20 @@ This file is the entry point; the actual divergence is split into a series of su
 | `db/Executor_test.go` | NEW. Model tests: Platforms round-trip, SupportsPlatform case-insensitive, IsRevoked, NewExecutorID format + uniqueness. |
 | `db/sql/executor_test.go` | NEW. Store tests: CRUD, duplicate-hostname + duplicate-executor-id rejected, GetByTenant + zone filter, GetClaimable (status + platforms + revoked), Revoke, IncrementAffinityViolation (not-found, first-time, auto-revoke at threshold, no-op on revoked, window reset). |
 
+### Divergence landed (R-I.1.c)
+
+| File | Change |
+|---|---|
+| `db/Store.go` | Adds tenant-scoped methods to `ProjectStore` / `InventoryManager` / `AccessKeyManager` (GetXForTenant / GetXsForTenant / UpdateXForTenant / DeleteXForTenant). Storage-layer filter, per design doc §4.2. |
+| `db/sql/project.go` | Implements the four project tenant-scoped wrappers. UpdateXForTenant + DeleteXForTenant verify the project first (defense in depth), so a cross-tenant write cannot succeed even if a handler forgets. |
+| `db/sql/inventory.go` | Implements the four inventory tenant-scoped wrappers. GetInventoriesForTenant verifies the project first then applies a per-row `pe.tenant_id=?` filter (corruption guard). |
+| `db/sql/access_key.go` | Implements the four access key tenant-scoped wrappers. UpdateAccessKeyForTenant rejects unbound keys (ProjectID == nil) — those are not project-scoped so the tenant filter cannot apply. |
+| `db/sql/tenant_filter_test.go` | NEW. 11 store-level tests: happy path + cross-tenant 404 + per-row filter + list filter + cross-tenant write/delete protection. |
+| `api/middleware/tenant_binding.go` | NEW. `TenantBinding` gorilla/mux middleware (request-time layer, design doc §4.1). Reads `X-Tenant-ID` + `X-Deployment-Zone-IDs` headers; skips `/api/v1/executor/*` + `/api/internal/*` (mTLS handles those). Honours `X-Skip-Tenant-Filter` only when `X-Service-Auth` is also present (placeholder; JWT validator lands in R-I.2). |
+| `api/middleware/tenant_binding_test.go` | NEW. 10 middleware tests: happy path + missing header + executor/internal skip + service-skip honour/ignore + zone-id trim + route classification. |
+| `api/router.go` | Adds `middleware.TenantBinding` to the `authenticatedAPI` subrouter middleware chain (after `authentication`). |
+| `FORK_NOTES.md` | R-I.1.c divergence row + planned sub-chunks updated. |
+
 The new columns are `NOT NULL DEFAULT '_unknown'`. Existing dev-instance rows backfill to `_unknown`; new rows from the API carry explicit values (enforced in R-I.1.c via `binding:"required"` + request-time middleware). The R-I.2 sweep removes any `_unknown` rows that survive to that point.
 
 ### Planned divergence (R-I sub-chunks)
@@ -61,9 +77,9 @@ The new columns are `NOT NULL DEFAULT '_unknown'`. Existing dev-instance rows ba
 | Sub-chunk | What changes |
 |---|---|
 | R-I.1.a | Fork baseline + `FORK_NOTES.md` + `api/public/` placeholder. DONE 2026-10-08. |
-| R-I.1.b | DB migration `v2.19.17` + new `Executor` entity + storage-layer wiring. **DONE in this commit.** |
-| R-I.1.c | 3 enforcement layers (request-time middleware + storage-layer filter + executor claim filter). |
-| R-I.1.d | 5 new executor API endpoints (`/api/v1/executor/{register,heartbeat,claim,result,affinity-violation}`) + audit propagation webhook (HMAC-SHA256). |
+| R-I.1.b | DB migration `v2.19.17` + new `Executor` entity + storage-layer wiring. DONE 2026-10-08. |
+| R-I.1.c | 3 enforcement layers (request-time middleware + storage-layer filter + executor claim filter). **DONE in this commit** (storage filter + middleware only; executor claim API endpoint is R-I.1.d). |
+| R-I.1.d | 5 new executor API endpoints (`/api/v1/executor/{register,heartbeat,claim,result,affinity-violation}`) + audit propagation webhook (HMAC-SHA256) + the platform-BE JWT validator for `X-Skip-Tenant-Filter`. |
 | R-I.1.e | 15 unit tests in `db/` + `db/sql/` + `api/`. |
 | R-I.4 | Customer-side deployment executor (lives in `executor/` subdirectory of THIS repo) |
 | R-I.5 | Windows Ansible playbook (PSRP/Kerberos + cert-based WinRM) |

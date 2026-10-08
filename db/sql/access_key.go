@@ -177,3 +177,96 @@ func (d *SqlDb) CreateAccessKey(key db.AccessKey) (newKey db.AccessKey, err erro
 func (d *SqlDb) DeleteAccessKey(projectID int, accessKeyID int) error {
 	return d.deleteObject(projectID, db.AccessKeyProps, accessKeyID)
 }
+
+// GetAccessKeyForTenant returns the access key only if its tenant_id
+// matches the supplied tenantID. Cross-tenant reads return ErrNotFound
+// (not 403) so the operator cannot probe for foreign-tenant resource
+// existence — per design doc §4.2 + decision 4.
+//
+// SentraOps fork (R-I.1.c).
+func (d *SqlDb) GetAccessKeyForTenant(projectID int, accessKeyID int, tenantID string) (db.AccessKey, error) {
+	key, err := d.GetAccessKey(projectID, accessKeyID)
+	if err != nil {
+		return db.AccessKey{}, err
+	}
+	if key.TenantID != tenantID {
+		return db.AccessKey{}, db.ErrNotFound
+	}
+	return key, nil
+}
+
+// GetAccessKeysForTenant returns the access keys for the project that
+// are also in the supplied tenant. Defense in depth: the project's own
+// tenant_id is verified first, then a per-row tenant_id filter is
+// applied.
+func (d *SqlDb) GetAccessKeysForTenant(projectID int, options db.GetAccessKeyOptions, params db.RetrieveQueryParams, tenantID string) ([]db.AccessKey, error) {
+	if _, err := d.GetProjectForTenant(projectID, tenantID); err != nil {
+		return nil, err
+	}
+
+	keys := make([]db.AccessKey, 0)
+	q, err := d.makeObjectsQuery(projectID, db.AccessKeyProps, params)
+	if err != nil {
+		return nil, err
+	}
+	q = q.Where("pe.tenant_id=?", tenantID)
+
+	if !options.IgnoreOwner {
+		q = q.Where("pe.owner=?", options.Owner)
+		switch options.Owner {
+		case db.AccessKeyVariable, db.AccessKeyEnvironment:
+			if options.EnvironmentID == nil {
+				return nil, db.ErrInvalidOperation
+			}
+			q = q.Where(squirrel.Eq{"pe.environment_id": *options.EnvironmentID})
+		case db.AccessKeySecretStorage:
+			q = q.Where(squirrel.Eq{"pe.storage_id": options.StorageID})
+		}
+	} else if options.EnvironmentID != nil {
+		q = q.Where(squirrel.Eq{"pe.environment_id": *options.EnvironmentID})
+	}
+
+	if options.SourceStorageID != nil {
+		q = q.Where(squirrel.Eq{"pe.source_storage_id": *options.SourceStorageID})
+	}
+
+	query, args, err := q.ToSql()
+	if err != nil {
+		return nil, err
+	}
+
+	_, err = d.selectAll(&keys, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	for i := range keys {
+		keys[i].Empty = keys[i].IsEmpty()
+	}
+	return keys, nil
+}
+
+// UpdateAccessKeyForTenant updates the access key only if its tenant_id
+// matches tenantID. Returns ErrNotFound on cross-tenant write.
+func (d *SqlDb) UpdateAccessKeyForTenant(key db.AccessKey, tenantID string) error {
+	// ProjectID is *int; an unbound key (e.g. an environment or
+	// secret-storage owned key) is not project-scoped so the tenant
+	// filter cannot apply. Reject those here so a malformed call
+	// fails loud instead of falling through to the unscoped path.
+	if key.ProjectID == nil {
+		return db.ErrInvalidOperation
+	}
+	if _, err := d.GetAccessKeyForTenant(*key.ProjectID, key.ID, tenantID); err != nil {
+		return err
+	}
+	return d.UpdateAccessKey(key)
+}
+
+// DeleteAccessKeyForTenant deletes the access key only if its tenant_id
+// matches tenantID. Returns ErrNotFound on cross-tenant delete.
+func (d *SqlDb) DeleteAccessKeyForTenant(projectID int, accessKeyID int, tenantID string) error {
+	if _, err := d.GetAccessKeyForTenant(projectID, accessKeyID, tenantID); err != nil {
+		return err
+	}
+	return d.DeleteAccessKey(projectID, accessKeyID)
+}

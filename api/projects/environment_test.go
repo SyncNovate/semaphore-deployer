@@ -31,6 +31,23 @@ func (m *mockAccessKeyRepo) CreateAccessKey(k db.AccessKey) (db.AccessKey, error
 }
 func (m *mockAccessKeyRepo) DeleteAccessKey(int, int) error { return nil }
 
+// Tenant-scoped variants (R-I.1.c). The mock bypasses the tenant
+// filter — these tests are scoped to the environment CRUD path, not
+// the cross-tenant enforcement path (which has its own storage-layer
+// tests in db/sql/tenant_filter_test.go).
+func (m *mockAccessKeyRepo) GetAccessKeyForTenant(projectID, accessKeyID int, tenantID string) (db.AccessKey, error) {
+	return m.GetAccessKey(projectID, accessKeyID)
+}
+func (m *mockAccessKeyRepo) GetAccessKeysForTenant(projectID int, options db.GetAccessKeyOptions, params db.RetrieveQueryParams, tenantID string) ([]db.AccessKey, error) {
+	return m.GetAccessKeys(projectID, options, params)
+}
+func (m *mockAccessKeyRepo) UpdateAccessKeyForTenant(k db.AccessKey, tenantID string) error {
+	return m.UpdateAccessKey(k)
+}
+func (m *mockAccessKeyRepo) DeleteAccessKeyForTenant(projectID, accessKeyID int, tenantID string) error {
+	return m.DeleteAccessKey(projectID, accessKeyID)
+}
+
 type mockAccessKeyService struct {
 	deleted []int
 	updated []db.AccessKey

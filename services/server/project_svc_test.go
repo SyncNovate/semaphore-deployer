@@ -50,6 +50,23 @@ func (m *mockProjectStore) GetProjectUser(projectID int, userID int) (db.Project
 }
 func (m *mockProjectStore) UpdateProjectUser(projectUser db.ProjectUser) error { return nil }
 
+// Tenant-scoped variants (R-I.1.c). The mock delegates to the
+// non-scoped methods — these tests are scoped to the project service
+// path, not the cross-tenant enforcement path (which has its own
+// storage-layer tests in db/sql/tenant_filter_test.go).
+func (m *mockProjectStore) GetProjectForTenant(projectID int, tenantID string) (db.Project, error) {
+	return m.GetProject(projectID)
+}
+func (m *mockProjectStore) GetProjectsForTenant(tenantID string) ([]db.Project, error) {
+	return m.GetAllProjects()
+}
+func (m *mockProjectStore) UpdateProjectForTenant(project db.Project, tenantID string) error {
+	return m.UpdateProject(project)
+}
+func (m *mockProjectStore) DeleteProjectForTenant(projectID int, tenantID string) error {
+	return m.DeleteProject(projectID)
+}
+
 type mockAccessKeyManager struct {
 	GetAccessKeysFn   func(projectID int, opts db.GetAccessKeyOptions, params db.RetrieveQueryParams) ([]db.AccessKey, error)
 	CreateAccessKeyFn func(key db.AccessKey) (db.AccessKey, error)
@@ -90,6 +107,23 @@ func (m *mockAccessKeyManager) GetAccessKeyRefs(projectID int, accessKeyID int) 
 	return db.ObjectReferrers{}, nil
 }
 func (m *mockAccessKeyManager) RekeyAccessKeys(oldKey string) error { return nil }
+
+// Tenant-scoped variants (R-I.1.c). The mock delegates to the
+// non-scoped methods — these tests are scoped to the project service
+// path, not the cross-tenant enforcement path (which has its own
+// storage-layer tests in db/sql/tenant_filter_test.go).
+func (m *mockAccessKeyManager) GetAccessKeyForTenant(projectID, accessKeyID int, tenantID string) (db.AccessKey, error) {
+	return m.GetAccessKey(projectID, accessKeyID)
+}
+func (m *mockAccessKeyManager) GetAccessKeysForTenant(projectID int, opts db.GetAccessKeyOptions, params db.RetrieveQueryParams, tenantID string) ([]db.AccessKey, error) {
+	return m.GetAccessKeys(projectID, opts, params)
+}
+func (m *mockAccessKeyManager) UpdateAccessKeyForTenant(k db.AccessKey, tenantID string) error {
+	return m.UpdateAccessKey(k)
+}
+func (m *mockAccessKeyManager) DeleteAccessKeyForTenant(projectID, accessKeyID int, tenantID string) error {
+	return m.DeleteAccessKey(projectID, accessKeyID)
+}
 
 func TestProjectServiceImpl_DeleteProject(t *testing.T) {
 	mockRepo := &mockProjectStore{

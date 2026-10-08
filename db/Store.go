@@ -262,6 +262,24 @@ type ProjectStore interface {
 	CreateProject(project Project) (Project, error)
 	DeleteProject(projectID int) error
 	UpdateProject(project Project) error
+	// GetProjectForTenant returns the project only if its tenant_id matches
+	// the supplied tenantID. Cross-tenant lookups return ErrNotFound
+	// (404, not 403) so the caller cannot probe for foreign-tenant
+	// resource existence — per design doc §4.2 + decision 4.
+	//
+	// SentraOps fork (R-I.1.c).
+	GetProjectForTenant(projectID int, tenantID string) (Project, error)
+	// GetProjectsForTenant lists every project in the given tenant.
+	// This is the operator-scoped equivalent of GetAllProjects; the
+	// platform-BE service-to-service path uses GetAllProjects (with
+	// X-Skip-Tenant-Filter set after mTLS validation).
+	GetProjectsForTenant(tenantID string) ([]Project, error)
+	// UpdateProjectForTenant updates the project only if its tenant_id
+	// matches tenantID. Returns ErrNotFound on cross-tenant write.
+	UpdateProjectForTenant(project Project, tenantID string) error
+	// DeleteProjectForTenant deletes the project only if its tenant_id
+	// matches tenantID. Returns ErrNotFound on cross-tenant delete.
+	DeleteProjectForTenant(projectID int, tenantID string) error
 	GetProjectUsers(projectID int, params RetrieveQueryParams) ([]UserWithProjectRole, error)
 	CreateProjectUser(projectUser ProjectUser) (ProjectUser, error)
 	DeleteProjectUser(projectID int, userID int) error
@@ -312,6 +330,13 @@ type InventoryManager interface {
 	UpdateInventory(inventory Inventory) error
 	CreateInventory(inventory Inventory) (Inventory, error)
 	DeleteInventory(projectID int, inventoryID int) error
+	// Tenant-scoped variants (R-I.1.c). Return ErrNotFound (not 403)
+	// on cross-tenant access so the operator cannot probe for foreign
+	// resource existence — per design doc §4.2 + decision 4.
+	GetInventoryForTenant(projectID int, inventoryID int, tenantID string) (Inventory, error)
+	GetInventoriesForTenant(projectID int, params RetrieveQueryParams, types []InventoryType, tenantID string) ([]Inventory, error)
+	UpdateInventoryForTenant(inventory Inventory, tenantID string) error
+	DeleteInventoryForTenant(projectID int, inventoryID int, tenantID string) error
 }
 
 // RepositoryManager handles repository-related operations
@@ -351,6 +376,12 @@ type AccessKeyManager interface {
 	UpdateAccessKey(accessKey AccessKey) error
 	CreateAccessKey(accessKey AccessKey) (AccessKey, error)
 	DeleteAccessKey(projectID int, accessKeyID int) error
+	// Tenant-scoped variants (R-I.1.c). Return ErrNotFound (not 403)
+	// on cross-tenant access — per design doc §4.2 + decision 4.
+	GetAccessKeyForTenant(projectID int, accessKeyID int, tenantID string) (AccessKey, error)
+	GetAccessKeysForTenant(projectID int, options GetAccessKeyOptions, params RetrieveQueryParams, tenantID string) ([]AccessKey, error)
+	UpdateAccessKeyForTenant(accessKey AccessKey, tenantID string) error
+	DeleteAccessKeyForTenant(projectID int, accessKeyID int, tenantID string) error
 }
 
 // IntegrationManager handles integration-related operations

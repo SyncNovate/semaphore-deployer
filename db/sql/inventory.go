@@ -31,6 +31,72 @@ func (d *SqlDb) DeleteInventory(projectID int, inventoryID int) error {
 	return d.deleteObject(projectID, db.InventoryProps, inventoryID)
 }
 
+// GetInventoryForTenant returns the inventory only if its tenant_id
+// matches the supplied tenantID. Cross-tenant reads return ErrNotFound
+// (not 403) so the operator cannot probe for foreign-tenant resource
+// existence — per design doc §4.2 + decision 4.
+//
+// SentraOps fork (R-I.1.c).
+func (d *SqlDb) GetInventoryForTenant(projectID int, inventoryID int, tenantID string) (db.Inventory, error) {
+	inv, err := d.GetInventory(projectID, inventoryID)
+	if err != nil {
+		return db.Inventory{}, err
+	}
+	if inv.TenantID != tenantID {
+		return db.Inventory{}, db.ErrNotFound
+	}
+	return inv, nil
+}
+
+// GetInventoriesForTenant returns the inventories for the project that
+// are also in the supplied tenant. Defense in depth: the project's own
+// tenant_id is verified first, then a per-row tenant_id filter is
+// applied so a cross-tenant row cannot sneak in via a join.
+func (d *SqlDb) GetInventoriesForTenant(projectID int, params db.RetrieveQueryParams, types []db.InventoryType, tenantID string) ([]db.Inventory, error) {
+	// Verify the project is in the tenant first (404 not 403 on
+	// cross-tenant project access).
+	if _, err := d.GetProjectForTenant(projectID, tenantID); err != nil {
+		return nil, err
+	}
+
+	q, err := d.makeObjectsQuery(projectID, db.InventoryProps, params)
+	if err != nil {
+		return nil, err
+	}
+	q = q.Where("pe.tenant_id=?", tenantID)
+
+	if len(types) > 0 {
+		q = q.Where(squirrel.Eq{"type": types})
+	}
+
+	query, args, err := q.ToSql()
+	if err != nil {
+		return nil, err
+	}
+
+	var inventories []db.Inventory
+	_, err = d.selectAll(&inventories, query, args...)
+	return inventories, err
+}
+
+// UpdateInventoryForTenant updates the inventory only if its tenant_id
+// matches tenantID. Returns ErrNotFound on cross-tenant write.
+func (d *SqlDb) UpdateInventoryForTenant(inventory db.Inventory, tenantID string) error {
+	if _, err := d.GetInventoryForTenant(inventory.ProjectID, inventory.ID, tenantID); err != nil {
+		return err
+	}
+	return d.UpdateInventory(inventory)
+}
+
+// DeleteInventoryForTenant deletes the inventory only if its tenant_id
+// matches tenantID. Returns ErrNotFound on cross-tenant delete.
+func (d *SqlDb) DeleteInventoryForTenant(projectID int, inventoryID int, tenantID string) error {
+	if _, err := d.GetInventoryForTenant(projectID, inventoryID, tenantID); err != nil {
+		return err
+	}
+	return d.DeleteInventory(projectID, inventoryID)
+}
+
 func (d *SqlDb) UpdateInventory(inventory db.Inventory) error {
 
 	_, err := d.exec(
