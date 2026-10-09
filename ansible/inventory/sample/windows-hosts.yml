@@ -1,0 +1,46 @@
+---
+# Sample Windows inventory for the SentraOps runner installer.
+#
+# The executor's claim response populates the per-host vars
+# at run time. Operators hand-edit this file (or generate
+# it from their AD/LDAP discovery) to declare:
+#   1. Which transport each target uses (kerberos or cert).
+#   2. The connection params for that transport.
+#
+# Two example targets below show both transports.
+#
+# Per the design doc §14.7: NEVER use unvalidated WinRM HTTP
+# (5985). The playbook's `assert` task blocks any attempt to
+# run with `winrm_transport=http` or similar.
+all:
+  vars:
+    ansible_connection: psrp  # default; overridden per host
+    ansible_psrp_protocol: https
+    ansible_psrp_port: 5986
+    ansible_psrp_cert_validation: validate
+    ansible_psrp_negotiate: true
+  children:
+    windows_targets:
+      hosts:
+        # AD-joined: PSRP / Kerberos. ansible_psrp_negotiate
+        # lets Ansible pick the strongest auth the AD domain
+        # advertises (Kerberos when available, NTLM fallback
+        # only when Kerberos is not reachable — and even then
+        # over HTTPS, never plaintext HTTP).
+        win-ad-joined-01:
+          ansible_host: 10.0.1.20
+          winrm_transport: kerberos
+          ansible_connection: psrp
+        # Workgroup: cert-based WinRM. The operator provides
+        # the path to a client-cert PEM + matching private key.
+        # The WinRM listener on the target must have the
+        # matching CA in its Trusted Root Certification
+        # Authorities store.
+        win-workgroup-01:
+          ansible_host: 10.0.2.30
+          winrm_transport: cert
+          ansible_connection: winrm
+          ansible_winrm_transport: cert
+          ansible_winrm_cert_pem: /etc/sentraops/certs/win-workgroup-01.client.pem
+          ansible_winrm_cert_key_pem: /etc/sentraops/certs/win-workgroup-01.client.key
+          ansible_winrm_server_cert_validation: validate

@@ -1,0 +1,19 @@
+---
+# Default group_vars for the SentraOps runner installer.
+#
+# The executor's Run() sets these vars from the claim
+# payload via env, NOT from inventory (so secrets don't
+# leak into VCS). Inventory vars here are network-level
+# defaults only.
+#
+# Operators override these per-host in windows-hosts.yml.
+---
+# Default connection. Per-host inventory overrides.
+ansible_connection: psrp
+ansible_psrp_protocol: https
+ansible_psrp_port: 5986
+ansible_psrp_cert_validation: validate
+
+# Retry policy for transient WinRM errors (network glitch).
+ansible_retry_count: 3
+ansible_retry_interval_seconds: 5

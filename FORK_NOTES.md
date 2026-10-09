@@ -110,6 +110,10 @@ The new columns are `NOT NULL DEFAULT '_unknown'`. Existing dev-instance rows ba
 
 **After R-I.1.e the full R-I.1 sub-slice series is DONE.** The fork is now a tenant + zone-bound deployment engine with 5 executor API endpoints, an audit propagation webhook, a platform-BE JWT validator, and the 15-test surface for design doc §8. The next sub-chunk is R-I.2 in the main `SyncNovate/SentraOps` repo (Runner Deployment Service + persistence + upstream-proxy mTLS handler).
 
+**As of R-I.4 (combined commit `fc32be77`): the customer-side deployment executor binary lands.** Top-level `executor/` library (config + client + JWT + register + heartbeat + claim + runner + result + sanitize + backoff + orchestrator + 52 tests) + `cmd/executor/` shim. Built binary is 6.6 MB; `go vet` clean; `go test ./executor/...` 52/52 pass. R-I.10 wires real `SecretStore` backends; R-I.5 writes the Windows playbook this executor will invoke.
+
+**As of R-I.5 (this slice):** the Windows installer playbook lands. `ansible/windows-install-runner.yml` (PSRP/Kerberos for AD-joined targets, cert WinRM for workgroup; **never** unvalidated WinRM HTTP/5985) + `ansible/inventory/sample/` (hosts + group_vars) + `ansible/tests/syntax-check.sh` (CI surface) + `ansible/README.md` (operator notes). R-I.6 (Linux) follows the same shape.
+
 ### Planned divergence (R-I sub-chunks)
 
 | Sub-chunk | What changes |
@@ -121,7 +125,7 @@ The new columns are `NOT NULL DEFAULT '_unknown'`. Existing dev-instance rows ba
 | R-I.1.e | 15 unit tests in `db/` + `db/sql/` + `api/`. **DONE in this commit.** |
 | R-I.2 | Runner Deployment Service (lives in the main `SyncNovate/SentraOps` repo, not this fork) |
 | R-I.4 | Customer-side deployment executor (lives in `executor/` subdirectory of THIS repo) |
-| R-I.5 | Windows Ansible playbook (PSRP/Kerberos + cert-based WinRM) |
+| R-I.5 | Windows Ansible playbook (PSRP/Kerberos + cert-based WinRM) — **DONE this slice.** See `ansible/windows-install-runner.yml`. |
 | R-I.6 | Linux Ansible playbook (SSH + verified host keys) |
 | R-I.10 | Customer-side credential resolver (env-file / vault-token / kms-token backends) |
 

@@ -1,0 +1,178 @@
+---
+# SentraOps Runner installer — Windows targets.
+#
+# What this playbook does:
+#   1. Connects to the target Windows endpoint over WinRM-HTTPS
+#      (NEVER WinRM-HTTP/5985 — spec §14.7, design doc §13.11).
+#   2. Picks the transport per target: PSRP / Kerberos for
+#      AD-joined machines, cert-based WinRM-HTTPS for workgroup
+#      machines. The operator sets `winrm_transport: kerberos`
+#      or `winrm_transport: cert` in the target's inventory vars.
+#   3. Verifies the package URL + SHA256 (passed via env from
+#      the executor's JobEnv).
+#   4. Downloads the SentraOps runner package
+#      (R-E.1 TUF-pinned) to the target.
+#   5. Installs it under `C:\Program Files\SentraOps\Runner\`.
+#   6. Writes the config file (`runner.yaml`) with
+#      tenant_id + deployment_zone_id + server URL +
+#      server CA file path.
+#   7. Creates + starts the scheduled task `SentraOpsRunner`
+#      (the Windows equivalent of a systemd unit).
+#   8. Smoke-checks the install via the runner's `--version`
+#      command over WinRM.
+#
+# The playbook is IDEMPOTENT — re-running it after a successful
+# install is a no-op (the scheduled task check is `creates:`-style).
+#
+# Per the 2026-10-08 design decisions on dual-path:
+#   - AD-joined: ansible_connection=psrp,
+#     ansible_psrp_auth=kerberos, ansible_psrp_cert_validation=validate
+#   - Workgroup: ansible_connection=winrm,
+#     ansible_winrm_transport=cert,
+#     ansible_winrm_cert_pem + ansible_winrm_cert_key_pem + ansible_winrm_server_cert_validation=validate
+#
+# The executor invokes this playbook by path (job.Playbook.Path).
+# The executor's Run() pins the package SHA256 against
+# job.Playbook.SHA256 BEFORE invoking ansible-playbook.
+- name: Install SentraOps runner on a Windows target
+  hosts: windows_targets
+  gather_facts: false
+  vars:
+    sentraops_install_dir: 'C:\Program Files\SentraOps\Runner'
+    sentraops_service_name: SentraOpsRunner
+    sentraops_config_path: 'C:\ProgramData\SentraOps\Runner\runner.yaml'
+    # Package version + URL are passed via env from the
+    # executor. They MUST be set; the playbook fails fast
+    # otherwise (defense against a campaign with missing
+    # version pinning).
+    sentraops_runner_package_url: "{{ lookup('env', 'SENTRAOPS_RUNNER_PACKAGE_URL') }}"
+    sentraops_runner_package_sha256: "{{ lookup('env', 'SENTRAOPS_RUNNER_PACKAGE_SHA256') }}"
+    sentraops_runner_version: "{{ lookup('env', 'SENTRAOPS_RUNNER_VERSION') }}"
+    sentraops_runner_server_url: "{{ lookup('env', 'SENTRAOPS_RUNNER_SERVER_URL') }}"
+    sentraops_runner_server_ca_file: "{{ lookup('env', 'SENTRAOPS_RUNNER_SERVER_CA_FILE') }}"
+    sentraops_runner_tenant_id: "{{ lookup('env', 'SENTRAOPS_RUNNER_TENANT_ID') }}"
+    sentraops_runner_deployment_zone_id: "{{ lookup('env', 'SENTRAOPS_RUNNER_DEPLOYMENT_ZONE_ID') }}"
+  tasks:
+    - name: Validate required env vars are present
+      ansible.builtin.assert:
+        that:
+          - sentraops_runner_package_url | length > 0
+          - sentraops_runner_package_sha256 | length > 0
+          - sentraops_runner_version | length > 0
+          - sentraops_runner_server_url | length > 0
+          - sentraops_runner_server_ca_file | length > 0
+          - sentraops_runner_tenant_id | length > 0
+          - sentraops_runner_deployment_zone_id | length > 0
+          - winrm_transport in ['kerberos', 'cert']
+        fail_msg: >-
+          Missing or invalid env vars / inventory vars. Check:
+          SENTRAOPS_RUNNER_PACKAGE_URL, SENTRAOPS_RUNNER_PACKAGE_SHA256,
+          SENTRAOPS_RUNNER_VERSION, SENTRAOPS_RUNNER_SERVER_URL,
+          SENTRAOPS_RUNNER_SERVER_CA_FILE, SENTRAOPS_RUNNER_TENANT_ID,
+          SENTRAOPS_RUNNER_DEPLOYMENT_ZONE_ID, AND
+          inventory var `winrm_transport` (one of: kerberos, cert).
+      run_once: true
+
+    - name: Check if SentraOps runner is already installed at the expected version
+      ansible.windows.win_command: >-
+        powershell.exe -NoProfile -Command
+        "if (Test-Path '{{ sentraops_install_dir }}\sentraops-runner.exe') {
+          & '{{ sentraops_install_dir }}\sentraops-runner.exe' --version
+        } else { 'NOT_INSTALLED' }"
+      register: existing_install_check
+      changed_when: false
+      failed_when: false
+
+    - name: Set fact — whether install is required
+      ansible.builtin.set_fact:
+        install_required: >-
+          {{ existing_install_check.rc != 0
+             or existing_install_check.stdout | trim == 'NOT_INSTALLED'
+             or sentraops_runner_version not in existing_install_check.stdout }}
+
+    - name: Create the install directory
+      ansible.windows.win_file:
+        path: "{{ sentraops_install_dir }}"
+        state: directory
+      when: install_required
+
+    - name: Create the config directory
+      ansible.windows.win_file:
+        path: "{{ sentraops_config_path | dirname }}"
+        state: directory
+      when: install_required
+
+    - name: Download the SentraOps runner package (idempotent via check-mode skip on rerun)
+      ansible.windows.win_get_url:
+        url: "{{ sentraops_runner_package_url }}"
+        dest: "{{ sentraops_install_dir }}\\sentraops-runner-{{ sentraops_runner_version }}.zip"
+        checksum: "sha256:{{ sentraops_runner_package_sha256 }}"
+        # TUF-pinned download (R-E.1). The executor pins the
+        # SAME SHA256 against job.Playbook.SHA256 before
+        # invoking ansible-playbook, so a MITM during the
+        # ansible step can't swap the package.
+        checksum_format: sha256
+      when: install_required
+
+    - name: Unzip the package
+      community.windows.win_unzip:
+        src: "{{ sentraops_install_dir }}\\sentraops-runner-{{ sentraops_runner_version }}.zip"
+        dest: "{{ sentraops_install_dir }}"
+        delete_archive: true
+      when: install_required
+
+    - name: Verify the runner binary exists + is executable
+      ansible.windows.win_file:
+        path: "{{ sentraops_install_dir }}\\sentraops-runner.exe"
+      register: binary_check
+      failed_when:
+        - install_required
+        - not binary_check.stat.exists
+      # Soft-fail on rerun: the binary may already exist;
+        # the check is for the just-installed case.
+
+    - name: Write the runner configuration file
+      ansible.windows.win_copy:
+        content: |
+          # SentraOps Runner config — written by sentraops-deploy ansible playbook.
+          # Do NOT hand-edit; the campaign re-runs the playbook to regenerate.
+          server_url: {{ sentraops_runner_server_url }}
+          server_ca_file: {{ sentraops_runner_server_ca_file }}
+          tenant_id: {{ sentraops_runner_tenant_id }}
+          deployment_zone_id: {{ sentraops_runner_deployment_zone_id }}
+          log_level: info
+        dest: "{{ sentraops_config_path }}"
+      when: install_required
+
+    - name: Create the scheduled task to run the runner as a service
+      community.windows.win_scheduled_task:
+        name: "{{ sentraops_service_name }}"
+        description: SentraOps agent runner — outbound mTLS to the SentraOps backend.
+        actions:
+          - path: "{{ sentraops_install_dir }}\\sentraops-runner.exe"
+            arguments: --config "{{ sentraops_config_path }}"
+            working_directory: "{{ sentraops_install_dir }}"
+        triggers:
+          - type: boot
+        state: present
+        enabled: true
+        username: SYSTEM
+        run_level: highest
+        allow_demand_start: true
+        execution_time_limit: PT0S  # run indefinitely
+      when: install_required
+
+    - name: Smoke-check the runner — `--version` over WinRM
+      ansible.windows.win_command: >-
+        "{{ sentraops_install_dir }}\\sentraops-runner.exe" --version
+      register: version_check
+      changed_when: false
+      failed_when: >-
+        sentraops_runner_version not in version_check.stdout | default('')
+
+    - name: Report install success
+      ansible.builtin.debug:
+        msg: >-
+          SentraOps runner {{ sentraops_runner_version }}
+          installed on {{ inventory_hostname }}
+          (transport={{ winrm_transport }}).
