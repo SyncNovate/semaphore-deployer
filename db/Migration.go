@@ -139,6 +139,11 @@ func GetMigrations(dialect string) []Migration {
 		// SentraOps fork (R-I.1.d): executor claim tracking on `task`
 		// so the deployment executor can atomically pick up tasks.
 		{Version: "2.19.18"},
+		// SentraOps fork (R-I.10.re1): enrollment_tokens table for
+		// the Wazuh-style "Send Executor" 1-click install flow. The
+		// token is single-use, short-lived (5 min TTL), and is the
+		// proof of tenant binding at /api/v1/executor/enroll time.
+		{Version: "2.19.19"},
 	}
 
 	return append(initScripts, commonScripts...)

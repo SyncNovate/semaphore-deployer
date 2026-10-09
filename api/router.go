@@ -187,6 +187,14 @@ func Route(
 	executorAPI := publicAPIRouter.PathPrefix("/v1/executor").Subrouter()
 	executorAPI.Use(JSONMiddleware)
 	executorAPI.HandleFunc("", executor.RegisterHandler).Methods("POST")
+	// R-I.10.re1: Wazuh-style "Send Executor" bootstrap. The
+	// customer's executor hits this on first boot with a
+	// short-lived enrollment token (X-Enrollment-Token) and gets
+	// back a long-lived mTLS cert + bearer token. Sits OUTSIDE
+	// both the tenant-binding middleware AND the
+	// executor-auth middleware — the token IS the proof of
+	// tenant binding at this point.
+	executorAPI.HandleFunc("/enroll", executor.EnrollHandler).Methods("POST")
 
 	executorAuthedAPI := publicAPIRouter.PathPrefix("/v1/executor").Subrouter()
 	executorAuthedAPI.Use(JSONMiddleware, executor.ExecutorAuthMiddleware)

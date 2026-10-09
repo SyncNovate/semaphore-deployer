@@ -632,6 +632,41 @@ type ExecutorManager interface {
 	HeartbeatExecutor(executorID string, status string, executorVersion string, ansibleVersion string, activeJobCount int) (Executor, error)
 }
 
+// EnrollmentTokenRepository is the persistence interface for the
+// short-lived single-use enrollment tokens used by the
+// /api/v1/executor/enroll endpoint (R-I.10.re1). The token IS the
+// proof of tenant binding at enrollment time — the handler never
+// trusts a tenant_id from the request body.
+type EnrollmentTokenRepository interface {
+	// CreateEnrollmentToken persists a fresh token row. The caller is
+	// the platform BE (out of scope for the /enroll handler itself).
+	// Returns ErrAlreadyExists on a token_hash collision (probability
+	// ~2^-256, so this is a programmer-error sentinel).
+	CreateEnrollmentToken(token EnrollmentToken) (EnrollmentToken, error)
+
+	// GetEnrollmentTokenByHash returns the token row whose
+	// token_hash matches the SHA-256 hex digest of the plaintext
+	// supplied by the executor. Returns ErrNotFound for empty hashes
+	// AND for hashes that match no row (existence-probe prevention —
+	// the handler maps both to the same 401).
+	GetEnrollmentTokenByHash(tokenHashHex string) (EnrollmentToken, error)
+
+	// ConsumeEnrollmentToken atomically marks the token consumed and
+	// stamps ConsumedByExecutorID. Returns the refreshed row. Returns:
+	//   - ErrNotFound       : token hash matches no row (handler → 401)
+	//   - ErrAlreadyExists  : token already consumed (handler → 409
+	//                         enrollment_token_already_consumed).
+	//                         Single-use is enforced here, not at the
+	//                         handler, so concurrent consume attempts
+	//                         race-safely.
+	//   - a domain error     : token exists, not consumed, but is
+	//                          past ExpiresAt (handler maps to 410
+	//                          enrollment_token_expired). The caller
+	//                          checks IsExpired() on the returned row
+	//                          before considering consume a success.
+	ConsumeEnrollmentToken(tokenHashHex string, executorID string, consumedAt time.Time) (EnrollmentToken, error)
+}
+
 type SecretStorageRepository interface {
 	GetSecretStorages(projectID int) ([]SecretStorage, error)
 	CreateSecretStorage(storage SecretStorage) (SecretStorage, error)
@@ -694,6 +729,7 @@ type Store interface {
 	RunnerManager
 	EventManager
 	ExecutorManager
+	EnrollmentTokenRepository
 	SecretStorageRepository
 	SecretSyncRepository
 	RoleRepository
