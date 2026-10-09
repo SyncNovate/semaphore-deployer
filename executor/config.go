@@ -74,10 +74,31 @@ type Config struct {
 	OfflineTimeoutMinutes int `yaml:"offline_timeout_minutes,omitempty" env:"OFFLINE_TIMEOUT_MINUTES" json:"offline_timeout_minutes,omitempty"`
 
 	// SecretStore is the customer-side secret store backend
-	// that resolves `credential_ref` strings to plaintext
-	// secrets. Stub interface only in R-I.4.a; R-I.10 wires the
-	// real backends (env-file / vault-token / kms-token).
+	// name. One of "noop", "processenv", "envfile", "vault".
+	// R-I.10 wires the real backends (env-file + Vault).
 	SecretStore string `yaml:"secret_store,omitempty" env:"SECRET_STORE" json:"secret_store,omitempty"`
+
+	// SecretStoreEnvFile is the path to a Docker-style env
+	// file when SecretStore=envfile. The file MUST be mode
+	// 0o600 — the executor refuses to load a world-readable
+	// secret. Conventional default: 
+	// /etc/sentraops-executor/credentials.env (Linux) or
+	// C:\ProgramData\SentraOps\Executor\credentials.env (Windows).
+	SecretStoreEnvFile string `yaml:"secret_store_env_file,omitempty" env:"SECRET_STORE_ENV_FILE" json:"secret_store_env_file,omitempty"`
+
+	// SecretStoreVaultURL is the Vault base URL when
+	// SecretStore=vault. MUST be https:// — plaintext URLs
+	// are refused at construction time.
+	SecretStoreVaultURL string `yaml:"secret_store_vault_url,omitempty" env:"SECRET_STORE_VAULT_URL" json:"secret_store_vault_url,omitempty"`
+
+	// SecretStoreVaultToken is the Vault token. Sensitive —
+	// prefer SENTRAOPS_EXECUTOR_VAULT_TOKEN env var over
+	// putting this in the YAML.
+	SecretStoreVaultToken string `yaml:"secret_store_vault_token,omitempty" env:"SECRET_STORE_VAULT_TOKEN" json:"secret_store_vault_token,omitempty"`
+
+	// SecretStoreVaultMount is the Vault KV v2 mount point.
+	// Defaults to "secret" when empty.
+	SecretStoreVaultMount string `yaml:"secret_store_vault_mount,omitempty" env:"SECRET_STORE_VAULT_MOUNT" json:"secret_store_vault_mount,omitempty"`
 
 	// LogLevel is the structured-logger level (debug / info /
 	// warn / error). Default: info.

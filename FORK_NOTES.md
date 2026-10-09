@@ -114,7 +114,13 @@ The new columns are `NOT NULL DEFAULT '_unknown'`. Existing dev-instance rows ba
 
 **As of R-I.5 (this slice):** the Windows installer playbook lands. `ansible/windows-install-runner.yml` (PSRP/Kerberos for AD-joined targets, cert WinRM for workgroup; **never** unvalidated WinRM HTTP/5985) + `ansible/inventory/sample/` (hosts + group_vars) + `ansible/tests/syntax-check.sh` (CI surface) + `ansible/README.md` (operator notes). R-I.6 (Linux) follows the same shape.
 
-**As of R-I.6 (this slice):** the Linux installer playbook lands. `ansible/linux-install-runner.yml` (SSH with strict host-key pinning, key-based auth + sudo, systemd unit with `NoNewPrivileges` + `ProtectSystem` + `ProtectHome`; package as static binary extracted under `/opt/sentraops-runner/`; config at `/etc/sentraops-runner/runner.yaml`). New inventory: `ansible/inventory/sample/linux-hosts.yml` (3 example targets: standard + RHEL + SELinux-enforcing with `NOPASSWD:`). Per-platform `group_vars/{windows,linux}_targets.yml` for transport defaults. README + inventory + group_vars updated. R-I.5 + R-I.6 share the same env-var contract (the executor's `Run()` sets them). R-I.10 wires the real `SecretStore` backends; R-I.7 (macOS) is DEFERRED.
+**As of R-I.6 (this slice):** the Linux installer playbook lands. `ansible/linux-install-runner.yml` (SSH with strict host-key pinning, key-based auth + sudo, systemd unit with `NoNewPrivileges` + `ProtectSystem` + `ProtectHome`; package as static binary extracted under `/opt/sentraops-runner/`; config at `/etc/sentraops-runner/runner.yaml`). New inventory: `ansible/inventory/sample/linux-hosts.yml` (3 example targets: standard + RHEL + SELinux-enforcing with `NOPASSWD:`). Per-platform `group_vars/{windows,linux}_targets.yml` for transport defaults. README + inventory + group_vars updated. R-I.5 + R-I.6 share the same env-var contract (the executor's `Run()` sets them). R-I.7 (macOS) is DEFERRED.
+
+**As of R-I.10 (this slice):** the real `SecretStore` backends land. Three concrete backends + factory:
+- `processenv`: reads `SENTRAOPS_EXECUTOR_CREDENTIAL_<REF>` from process env (uppercase, `-`/`.`/` ` → `_`)
+- `envfile`: Docker-style env file at `Config.SecretStoreEnvFile` (or `SENTRAOPS_EXECUTOR_CREDENTIALS_FILE`), mode 0o600 enforced — refuses world-readable files loudly
+- `vault`: HashiCorp Vault KV v2 over HTTPS only; reads `data.data.{value|credential|password|secret}`; supports `secret/data/<path>` full-path refs
+- Factory `NewSecretStoreFromConfig` picks the backend based on `Config.SecretStore`; unknown / missing config fails loud at startup (no silent fallback to noop). New Config fields: `SecretStore`, `SecretStoreEnvFile`, `SecretStoreVaultURL`, `SecretStoreVaultToken`, `SecretStoreVaultMount`. Executor now uses the factory when no `SecretStore` is injected directly (test scaffolding still works). ~22 new test cases; full suite is 165 test cases all green; `go vet` clean.
 
 ### Planned divergence (R-I sub-chunks)
 
@@ -129,7 +135,7 @@ The new columns are `NOT NULL DEFAULT '_unknown'`. Existing dev-instance rows ba
 | R-I.4 | Customer-side deployment executor (lives in `executor/` subdirectory of THIS repo) |
 | R-I.5 | Windows Ansible playbook (PSRP/Kerberos + cert-based WinRM) — **DONE this slice.** See `ansible/windows-install-runner.yml`. |
 | R-I.6 | Linux Ansible playbook (SSH with verified host keys + sudo become; systemd unit with hardening) — **DONE this slice.** See `ansible/linux-install-runner.yml`. |
-| R-I.10 | Customer-side credential resolver (env-file / vault-token / kms-token backends) |
+| R-I.10 | Customer-side credential resolver (env-file / Vault backends + noop / process-env) — **DONE this slice.** See `executor/secret_*.go`. |
 
 ### NEVER changed from upstream
 

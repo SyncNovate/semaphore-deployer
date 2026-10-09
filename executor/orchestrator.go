@@ -82,11 +82,14 @@ func NewExecutor(
 	if signer == nil {
 		return nil, errors.New("executor/orchestrator: Signer is required")
 	}
-	if secrets == nil {
-		// Default to NoopSecretStore so the executor still
-		// RUNS in V1; the playbook will fail at run time with
-		// a clear error (NoopSecretStore errors are loud).
-		secrets = NoopSecretStore{}
+	resolvedSecrets := secrets
+	if resolvedSecrets == nil {
+		var err error
+		resolvedSecrets, err = NewSecretStoreFromConfig(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("executor/orchestrator: SecretStore: %w", err)
+		}
+		logger.WithField("backend", cfg.SecretStore).Info("executor/orchestrator: SecretStore backend wired")
 	}
 	if cfg.ExecutorID == "" {
 		// ExecutorID may be auto-assigned at registration.
@@ -98,7 +101,7 @@ func NewExecutor(
 		cfg:          cfg,
 		client:       client,
 		signer:       signer,
-		secrets:      secrets,
+		secrets:      resolvedSecrets,
 		tenantID:     cfg.TenantID,
 		zoneID:       cfg.DeploymentZoneID,
 		executorID:   cfg.ExecutorID,
