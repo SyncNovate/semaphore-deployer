@@ -6,14 +6,13 @@
 # leak into VCS). Inventory vars here are network-level
 # defaults only.
 #
-# Operators override these per-host in windows-hosts.yml.
+# Operators override these per-host in
+#   windows-hosts.yml              (Windows / WinRM targets)
+#   linux-hosts.yml                (Linux / SSH targets)
+# Plus, per-platform defaults live in:
+#   group_vars/windows_targets.yml
+#   group_vars/linux_targets.yml
 ---
-# Default connection. Per-host inventory overrides.
-ansible_connection: psrp
-ansible_psrp_protocol: https
-ansible_psrp_port: 5986
-ansible_psrp_cert_validation: validate
-
-# Retry policy for transient WinRM errors (network glitch).
+# Retry policy for transient WinRM/SSH errors (network glitch).
 ansible_retry_count: 3
 ansible_retry_interval_seconds: 5

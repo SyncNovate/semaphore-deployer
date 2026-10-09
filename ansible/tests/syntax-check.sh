@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Syntax-check the SentraOps deployment playbooks.
 #
-# Why a shell script instead of just `ansible-playbook --syntax-check`:
-# we want CI to fail loudly + early when the playbook has a typo or
-# references an unknown module. Running on the executor's workstation
-# (`mavis-access@…`) keeps the test surface small — no actual Windows
-# target needed.
+# Checks BOTH the Windows + Linux installers (plus sample
+# inventory parsing) on the executor's workstation.
+# No actual Windows / Linux target is needed — `--syntax-check`
+# just validates YAML + module refs.
 #
 # Usage:
 #   ansible/tests/syntax-check.sh
@@ -15,18 +14,24 @@
 set -euo pipefail
 
 PLAYBOOK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-INVENTORY="${PLAYBOOK_DIR}/inventory/sample/windows-hosts.yml"
 
 if ! command -v ansible-playbook >/dev/null 2>&1; then
   echo "FATAL: ansible-playbook not on PATH" >&2
-  echo "Install: pip install ansible ansible.windows community.windows" >&2
+  echo "Install: pip3 install --user ansible ansible-core" >&2
+  echo "         ansible-galaxy collection install ansible.windows community.windows" >&2
   exit 2
 fi
 
 echo "==> syntax-checking windows-install-runner.yml"
 ansible-playbook \
   --syntax-check \
-  -i "${INVENTORY}" \
+  -i "${PLAYBOOK_DIR}/inventory/sample/windows-hosts.yml" \
   "${PLAYBOOK_DIR}/windows-install-runner.yml"
+
+echo "==> syntax-checking linux-install-runner.yml"
+ansible-playbook \
+  --syntax-check \
+  -i "${PLAYBOOK_DIR}/inventory/sample/linux-hosts.yml" \
+  "${PLAYBOOK_DIR}/linux-install-runner.yml"
 
 echo "==> syntax-check PASS"

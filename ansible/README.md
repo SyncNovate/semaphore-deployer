@@ -63,6 +63,19 @@ Run from the repo root:
 
 That's the entire test surface in R-I.5 — there are no actual Windows targets in the executor's environment to run an integration test against. Real install/upgrade verification happens during the R-I.11 live QA cycle (once the executor binary is wired into a live fork-env).
 
-## R-I.6 follows the same shape
+## Linux transport
 
-R-I.6 (Linux playbook) will land in `ansible/linux-install-runner.yml` with the same task structure (validate env / download / install / scheduled-task-equivalent / smoke-check) and a different transport layer (SSH with verified host keys; see plan doc §13.12).
+`linux-install-runner.yml` runs over SSH with **strict host-key pinning** (`StrictHostKeyChecking=yes`, pinned via `/etc/ssh/ssh_known_hosts`). Private key + user are resolved via the executor's `SecretStore` (R-I.10 backends); sudo with `NOPASSWD` is preferred for the automation user.
+
+| Pattern | Used for |
+|---|---|
+| `connection: ssh` + key-based auth | normal deploy (preferred) |
+| `connection: ssh` + `--ask-pass` | legacy fallback (interactive; CI/CD unfriendly) |
+
+The playbook fails closed if the env vars on §"Running" are missing — see the `assert` task.
+
+---
+
+## R-I.7 follows the same shape for macOS
+
+R-I.7 is DEFERRED per the plan doc — macOS runner support needs (a) Apple Developer ID for code-signing + notarization and (b) a macOS VM in the CI lane. When those unblock, a `macos-install-runner.yml` follows the same shape.

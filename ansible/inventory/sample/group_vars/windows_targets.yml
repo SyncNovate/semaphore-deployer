@@ -1,0 +1,9 @@
+---
+# Default group_vars for Windows / WinRM targets.
+# Used only when the target's winrm_transport is 'kerberos';
+# for 'cert' targets the per-host inventory carries the
+# ansible_winrm_transport=cert + client-cert paths.
+ansible_connection: psrp
+ansible_psrp_protocol: https
+ansible_psrp_port: 5986
+ansible_psrp_cert_validation: validate

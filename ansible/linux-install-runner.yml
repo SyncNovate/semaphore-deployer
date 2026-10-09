@@ -1,0 +1,225 @@
+---
+# SentraOps Runner installer — Linux targets.
+#
+# What this playbook does:
+#   1. Connects to the target Linux endpoint over SSH with a
+#      verified host key (per design doc §14.7: SSH with
+#      verified host keys; never skip host-key pinning).
+#   2. Authenticates using a private key delivered via the
+#      executor's SecretStore (`credential_ref` resolution).
+#   3. Verifies the package URL + SHA256 (passed via env from
+#      the executor's JobEnv).
+#   4. Downloads the SentraOps runner package
+#      (R-E.1 TUF-pinned) to a staging path on the target.
+#   5. Installs it under /opt/sentraops-runner/.
+#   6. Writes the config file (/etc/sentraops-runner/runner.yaml)
+#      with tenant_id + deployment_zone_id + server URL +
+#      server CA file path.
+#   7. Creates + enables + starts the systemd unit
+#      `sentraops-runner.service`.
+#   8. Smoke-checks the install via the runner's `--version`
+#      command over SSH.
+#
+# The playbook is IDEMPOTENT — re-running after a successful
+# install is a no-op (the version-check task gates all
+# subsequent tasks).
+#
+# Per R-I.6's design doc: "SSH with verified host keys".
+# ansible_host_key_checking defaults to True in ansible-core;
+# we pin it explicitly so a hostile operator (or a misuse) can't
+# silently turn it off. StrictHostKeyChecking=yes at the SSH
+# level (= ansible_host_key_checking=True).
+- name: Install SentraOps runner on a Linux target
+  hosts: linux_targets
+  gather_facts: true
+  vars:
+    sentraops_install_dir: /opt/sentraops-runner
+    sentraops_service_name: sentraops-runner
+    sentraops_config_path: /etc/sentraops-runner/runner.yaml
+    sentraops_user: sentraops
+    sentraops_group: sentraops
+    # Package version + URL are passed via env from the
+    # executor. They MUST be set; the playbook fails fast
+    # otherwise (defense against a campaign with missing
+    # version pinning).
+    sentraops_runner_package_url: "{{ lookup('env', 'SENTRAOPS_RUNNER_PACKAGE_URL') }}"
+    sentraops_runner_package_sha256: "{{ lookup('env', 'SENTRAOPS_RUNNER_PACKAGE_SHA256') }}"
+    sentraops_runner_version: "{{ lookup('env', 'SENTRAOPS_RUNNER_VERSION') }}"
+    sentraops_runner_server_url: "{{ lookup('env', 'SENTRAOPS_RUNNER_SERVER_URL') }}"
+    sentraops_runner_server_ca_file: "{{ lookup('env', 'SENTRAOPS_RUNNER_SERVER_CA_FILE') }}"
+    sentraops_runner_tenant_id: "{{ lookup('env', 'SENTRAOPS_RUNNER_TENANT_ID') }}"
+    sentraops_runner_deployment_zone_id: "{{ lookup('env', 'SENTRAOPS_RUNNER_DEPLOYMENT_ZONE_ID') }}"
+    # Connection-level security: strict host-key pinning per
+    # design doc §14.7 (SSH with verified host keys).
+    # ansible_host_key_checking=True == StrictHostKeyChecking=yes.
+    ansible_connection: ssh
+    ansible_host_key_checking: true
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=yes -o UserKnownHostsFile=/etc/ssh/ssh_known_hosts"
+  tasks:
+    - name: Validate required env vars are present
+      ansible.builtin.assert:
+        that:
+          - sentraops_runner_package_url | length > 0
+          - sentraops_runner_package_sha256 | length > 0
+          - sentraops_runner_version | length > 0
+          - sentraops_runner_server_url | length > 0
+          - sentraops_runner_server_ca_file | length > 0
+          - sentraops_runner_tenant_id | length > 0
+          - sentraops_runner_deployment_zone_id | length > 0
+        fail_msg: >-
+          Missing required env vars. Check:
+          SENTRAOPS_RUNNER_PACKAGE_URL, SENTRAOPS_RUNNER_PACKAGE_SHA256,
+          SENTRAOPS_RUNNER_VERSION, SENTRAOPS_RUNNER_SERVER_URL,
+          SENTRAOPS_RUNNER_SERVER_CA_FILE, SENTRAOPS_RUNNER_TENANT_ID,
+          SENTRAOPS_RUNNER_DEPLOYMENT_ZONE_ID.
+
+    - name: Check if SentraOps runner is already installed at the expected version
+      ansible.builtin.command: "{{ sentraops_install_dir }}/sentraops-runner --version"
+      register: existing_install_check
+      changed_when: false
+      failed_when: false
+      check_mode: false
+
+    - name: Set fact — whether install is required
+      ansible.builtin.set_fact:
+        install_required: >-
+          {{ existing_install_check.rc != 0
+             or sentraops_runner_version not in existing_install_check.stdout | default('') }}
+
+    - name: Create the system user + group for the runner
+      ansible.builtin.user:
+        name: "{{ sentraops_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ sentraops_install_dir }}"
+        create_home: false
+      when: install_required
+
+    - name: Create the install directory
+      ansible.builtin.file:
+        path: "{{ sentraops_install_dir }}"
+        state: directory
+        owner: "{{ sentraops_user }}"
+        group: "{{ sentraops_group }}"
+        mode: '0750'
+      when: install_required
+
+    - name: Create the config directory
+      ansible.builtin.file:
+        path: "{{ sentraops_config_path | dirname }}"
+        state: directory
+        owner: root
+        group: "{{ sentraops_group }}"
+        mode: '0750'
+      when: install_required
+
+    - name: Download the SentraOps runner package (TUF-pinned)
+      ansible.builtin.get_url:
+        url: "{{ sentraops_runner_package_url }}"
+        dest: "/tmp/sentraops-runner-{{ sentraops_runner_version }}.tar.gz"
+        checksum: "sha256:{{ sentraops_runner_package_sha256 }}"
+        # TUF-pinned download (R-E.1). The executor pins the
+        # SAME SHA256 against job.Playbook.SHA256 before
+        # invoking ansible-playbook, so a MITM during the
+        # ansible step can't swap the package.
+        mode: '0600'
+      when: install_required
+
+    - name: Extract the package into the install directory
+      ansible.builtin.unarchive:
+        src: "/tmp/sentraops-runner-{{ sentraops_runner_version }}.tar.gz"
+        dest: "{{ sentraops_install_dir }}"
+        remote_src: true
+        owner: "{{ sentraops_user }}"
+        group: "{{ sentraops_group }}"
+        extra_opts:
+          - --strip-components=1
+      when: install_required
+
+    - name: Remove the staging tarball (we keep nothing in /tmp after install)
+      ansible.builtin.file:
+        path: "/tmp/sentraops-runner-{{ sentraops_runner_version }}.tar.gz"
+        state: absent
+      when: install_required
+
+    - name: Verify the runner binary exists + is executable
+      ansible.builtin.stat:
+        path: "{{ sentraops_install_dir }}/sentraops-runner"
+      register: binary_check
+      failed_when:
+        - install_required
+        - not binary_check.stat.exists or not binary_check.stat.executable
+      # Soft-fail on rerun: the binary may already exist;
+      # the check is for the just-installed case.
+
+    - name: Write the runner configuration file
+      ansible.builtin.copy:
+        content: |
+          # SentraOps Runner config — written by sentraops-deploy ansible playbook.
+          # Do NOT hand-edit; the campaign re-runs the playbook to regenerate.
+          server_url: {{ sentraops_runner_server_url }}
+          server_ca_file: {{ sentraops_runner_server_ca_file }}
+          tenant_id: {{ sentraops_runner_tenant_id }}
+          deployment_zone_id: {{ sentraops_runner_deployment_zone_id }}
+          log_level: info
+        dest: "{{ sentraops_config_path }}"
+        owner: root
+        group: "{{ sentraops_group }}"
+        mode: '0640'
+      when: install_required
+
+    - name: Install the systemd unit file
+      ansible.builtin.copy:
+        content: |
+          [Unit]
+          Description=SentraOps agent runner — outbound mTLS to the SentraOps backend.
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User={{ sentraops_user }}
+          Group={{ sentraops_group }}
+          ExecStart={{ sentraops_install_dir }}/sentraops-runner --config {{ sentraops_config_path }}
+          Restart=on-failure
+          RestartSec=5s
+          NoNewPrivileges=true
+          ProtectSystem=strict
+          ProtectHome=true
+          PrivateTmp=true
+          ReadWritePaths={{ sentraops_install_dir }} /var/log/sentraops-runner
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: "/etc/systemd/system/{{ sentraops_service_name }}.service"
+        owner: root
+        group: root
+        mode: '0644'
+      when: install_required
+      notify: reload systemd
+
+    - name: Enable + start the systemd unit
+      ansible.builtin.systemd:
+        name: "{{ sentraops_service_name }}"
+        enabled: true
+        state: started
+        daemon_reload: true
+      when: install_required
+
+    - name: Smoke-check the runner — `--version` over SSH
+      ansible.builtin.command: "{{ sentraops_install_dir }}/sentraops-runner --version"
+      register: version_check
+      changed_when: false
+      failed_when: >-
+        sentraops_runner_version not in version_check.stdout | default('')
+
+    - name: Report install success
+      ansible.builtin.debug:
+        msg: >-
+          SentraOps runner {{ sentraops_runner_version }}
+          installed on {{ inventory_hostname }}.
+
+  handlers:
+    - name: reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
