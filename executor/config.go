@@ -103,6 +103,24 @@ type Config struct {
 	// LogLevel is the structured-logger level (debug / info /
 	// warn / error). Default: info.
 	LogLevel string `yaml:"log_level,omitempty" env:"LOG_LEVEL" json:"log_level,omitempty"`
+
+	// BootstrapToken is the single-use, short-lived token the
+	// platform BE bakes into the install bundle (5 min TTL per
+	// db.EnrollmentTokenTTL). The executor consumes it at first
+	// boot via the `--bootstrap` subcommand to mint its long-lived
+	// mTLS cert. Cleared from disk after a successful exchange so
+	// a stolen disk snapshot cannot replay it. Optional in normal
+	// mode — empty means "skip" and means the operator pre-installed
+	// the cert (the old R-I.4 path, still supported for legacy
+	// bundles during the migration window).
+	BootstrapToken string `yaml:"bootstrap_token,omitempty" env:"BOOTSTRAP_TOKEN" json:"bootstrap_token,omitempty"`
+
+	// BootstrapURL is the server URL to call for `--bootstrap`.
+	// Same as ServerURL in production but kept separate so an
+	// installer can pre-bake a different URL into the bundle
+	// (e.g. a staging URL for QA builds). Falls back to ServerURL
+	// when empty.
+	BootstrapURL string `yaml:"bootstrap_url,omitempty" env:"BOOTSTRAP_URL" json:"bootstrap_url,omitempty"`
 }
 
 // defaults returns a Config with sensible defaults. Applied BEFORE
@@ -192,6 +210,12 @@ func applyEnvOverrides(cfg *Config) {
 	if v := os.Getenv("SENTRAOPS_EXECUTOR_LOG_LEVEL"); v != "" {
 		cfg.LogLevel = v
 	}
+	if v := os.Getenv("SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN"); v != "" {
+		cfg.BootstrapToken = v
+	}
+	if v := os.Getenv("SENTRAOPS_EXECUTOR_BOOTSTRAP_URL"); v != "" {
+		cfg.BootstrapURL = v
+	}
 }
 
 // validate enforces the required-field contract. Returns the
@@ -238,6 +262,10 @@ func (c Config) validate() error {
 	default:
 		return fmt.Errorf("log_level must be one of debug/info/warn/error, got %q",
 			c.LogLevel)
+	}
+	if strings.TrimSpace(c.BootstrapToken) != "" && strings.TrimSpace(c.ServerURL) == "" {
+		return fmt.Errorf("bootstrap_token present but server_url is empty " +
+			"(set server_url or unset bootstrap_token)")
 	}
 	return nil
 }

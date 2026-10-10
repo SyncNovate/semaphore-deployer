@@ -53,6 +53,9 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	dryRun := fs.Bool("dry-run", false,
 		"load + validate the config, print it as JSON, then exit "+
 			"(no network calls, no registration, no claim loop)")
+	bootstrap := fs.Bool("bootstrap", false,
+		"exchange the enrollment_token in the config for a long-lived mTLS cert, "+
+			"then exit (used by install.sh / install.ps1 at first-boot only)")
 	if err := fs.Parse(args); err != nil {
 		// flag.ContinueOnError already wrote the error message
 		// to stderr. Return 2 (the standard exit code for
@@ -95,6 +98,22 @@ func Main(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintln(stdout, string(out))
+		return 0
+	}
+
+	if *bootstrap {
+		// R-I.10.re2: first-boot bootstrap. Exchanges the
+		// short-lived enrollment token for a long-lived mTLS
+		// cert via /api/v1/executor/enroll, writes the cert +
+		// key + CA bundle to the standard paths, clears the
+		// token from the config, and exits. The install script
+		// (install.sh / install.ps1) calls this once on first
+		// install; subsequent restarts no-op because the cert is
+		// already on disk.
+		if err := RunBootstrap(cfg, *configPath, logger); err != nil {
+			logger.WithError(err).Error("executor: bootstrap failed")
+			return 1
+		}
 		return 0
 	}
 
