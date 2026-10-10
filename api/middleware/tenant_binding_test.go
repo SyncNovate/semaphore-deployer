@@ -282,7 +282,7 @@ MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=
 	assert.Equal(t, fakePEM, string(PlatformPublicKeyPEM))
 
 	// Empty env var leaves the var empty (so the middleware refuses
-	// service-skip with ``service_auth_not_configured`` — fail closed).
+	// service-skip with ``service_auth_not_configured`` â€” fail closed).
 	t.Setenv("SENTRAOPS_PLATFORM_PUBLIC_KEY_PEM", "")
 	LoadPlatformPublicKeyFromEnv()
 	assert.Equal(t, "", string(PlatformPublicKeyPEM))
