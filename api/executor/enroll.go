@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -216,10 +217,10 @@ func mintExecutorBearerToken() (string, string, error) {
 
 // loadPlatformCA loads the platform's CA from the platform's KMS /
 // file (env var SENTRAOPS_PLATFORM_CA_CERT_PEM + KEY_PEM for now;
-// the production wiring is R-I.10.re1 follow-up). For test
-// scaffolding, callers can override via WithCAPEM at startup; the
-// default behaviour (no CA configured) returns an error so a
-// production server with a misconfigured KMS fails loud.
+// the production KMS wiring is R-I.10.re1 follow-up). For test
+// scaffolding, callers can override via SetPlatformCAPEMForTest;
+// the default behaviour reads the env vars and returns an error so
+// a production server with a misconfigured KMS fails loud.
 func loadPlatformCA() (certgen.CAMaterial, error) {
 	certPEM, keyPEM := lookupPlatformCAPEM()
 	if len(certPEM) == 0 || len(keyPEM) == 0 {
@@ -270,10 +271,15 @@ func lookupPlatformCAPEM() ([]byte, []byte)       { return platformCAPEMOverride
 func lookupPublicURLOverride() string              { return platformPublicURLOverride() }
 
 func defaultPlatformCAPEM() ([]byte, []byte) {
-	// Production wiring (R-I.10.re1 follow-up): read from the
-	// platform's KMS. For this slice, env-var fallback so the
-	// handler compiles + can be smoke-tested.
-	return nil, nil
+	certEnv := os.Getenv("SENTRAOPS_PLATFORM_CA_CERT_PEM")
+	keyEnv := os.Getenv("SENTRAOPS_PLATFORM_CA_KEY_PEM")
+	log.WithFields(map[string]any{
+		"cert_len": len(certEnv),
+		"key_len":  len(keyEnv),
+	}).Info("defaultPlatformCAPEM: env read")
+	certPEM := []byte(strings.TrimSpace(certEnv))
+	keyPEM := []byte(strings.TrimSpace(keyEnv))
+	return certPEM, keyPEM
 }
 
 func defaultPlatformPublicURL() string { return "" }
