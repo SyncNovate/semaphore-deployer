@@ -2,7 +2,10 @@ package middleware
 
 import (
 	"net/http"
+	"os"
 	"strings"
+
+	log "github.com/sirupsen/logrus"
 
 	"github.com/semaphoreui/semaphore/pkg/jwt"
 
@@ -66,6 +69,37 @@ const (
 //
 // R-I.1.d.
 var PlatformPublicKeyPEM []byte
+
+// LoadPlatformPublicKeyFromEnv reads the platform's PEM-encoded public
+// key from the SENTRAOPS_PLATFORM_PUBLIC_KEY_PEM env var and stores it
+// in PlatformPublicKeyPEM. Called automatically from init() so the fork
+// boots with the key loaded; tests that want to inject a key should
+// call this directly (or use SetPlatformPublicKeyPEMForTest).
+//
+// R-I.11.live followup — the wire that closes the R-I.9 SOC console's
+// Send Executor live-smoke gap (the fork returned
+// ``service_auth_not_configured`` because nothing loaded the env var).
+func LoadPlatformPublicKeyFromEnv() {
+	pemEnv := os.Getenv("SENTRAOPS_PLATFORM_PUBLIC_KEY_PEM")
+	pem := []byte(strings.TrimSpace(pemEnv))
+	PlatformPublicKeyPEM = pem
+	log.WithFields(map[string]any{
+		"pem_len": len(pem),
+	}).Info("middleware: platform public key loaded from env")
+}
+
+// SetPlatformPublicKeyPEMForTest lets tests inject a key directly.
+// Not part of the production API.
+func SetPlatformPublicKeyPEMForTest(pem []byte) {
+	PlatformPublicKeyPEM = pem
+}
+
+func init() {
+	// Boot-time loader: pulls SENTRAOPS_PLATFORM_PUBLIC_KEY_PEM into
+	// PlatformPublicKeyPEM so the live fork-env (and any other boot
+	// path) has the key ready before the first request lands.
+	LoadPlatformPublicKeyFromEnv()
+}
 
 // TenantBinding is the request-time middleware that resolves the
 // operator's tenant scope and stores it in the request context.

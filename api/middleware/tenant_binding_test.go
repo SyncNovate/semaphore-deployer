@@ -261,3 +261,35 @@ func TestIsTenantUnboundRoute(t *testing.T) {
 	assert.False(t, isTenantUnboundRoute("/api/projects"))
 	assert.False(t, isTenantUnboundRoute("/api/internal_other"))
 }
+
+// TestLoadPlatformPublicKeyFromEnv pins the env loader contract that
+// closes the R-I.9 SOC console live-smoke gap (the fork returned
+// ``service_auth_not_configured`` because nothing loaded the env var
+// at boot). The loader MUST be called from init() so the live fork
+// picks the key up at start time. Tests that want to inject a key
+// use SetPlatformPublicKeyPEMForTest (or withPlatformKey).
+func TestLoadPlatformPublicKeyFromEnv(t *testing.T) {
+	prevKey := PlatformPublicKeyPEM
+	t.Cleanup(func() { PlatformPublicKeyPEM = prevKey })
+
+	// Loader reads the env var + trims whitespace; a valid PEM
+	// string is stored verbatim in PlatformPublicKeyPEM.
+	const fakePEM = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=
+-----END PUBLIC KEY-----`
+	t.Setenv("SENTRAOPS_PLATFORM_PUBLIC_KEY_PEM", fakePEM)
+	LoadPlatformPublicKeyFromEnv()
+	assert.Equal(t, fakePEM, string(PlatformPublicKeyPEM))
+
+	// Empty env var leaves the var empty (so the middleware refuses
+	// service-skip with ``service_auth_not_configured`` — fail closed).
+	t.Setenv("SENTRAOPS_PLATFORM_PUBLIC_KEY_PEM", "")
+	LoadPlatformPublicKeyFromEnv()
+	assert.Equal(t, "", string(PlatformPublicKeyPEM))
+
+	// Whitespace-only env var is trimmed to empty for the same
+	// fail-closed reason.
+	t.Setenv("SENTRAOPS_PLATFORM_PUBLIC_KEY_PEM", "   ")
+	LoadPlatformPublicKeyFromEnv()
+	assert.Equal(t, "", string(PlatformPublicKeyPEM))
+}
