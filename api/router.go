@@ -195,6 +195,15 @@ func Route(
 	// executor-auth middleware — the token IS the proof of
 	// tenant binding at this point.
 	executorAPI.HandleFunc("/enroll", executor.EnrollHandler).Methods("POST")
+	// R-I.9: "Send Executor" mint endpoint. The platform BE drives
+	// this with its service JWT + X-Register-Token to mint an
+	// enrollment token on behalf of an operator who clicked the
+	// button in the SOC console's Deployments tab. Sits OUTSIDE
+	// both the tenant-binding middleware AND the executor-auth
+	// middleware — the BE (not the customer's executor) is the
+	// actor; the JWT carries the BE's tenant scope + the
+	// operator's actor_id for audit attribution.
+	executorAPI.HandleFunc("/enroll-token", executor.EnrollTokenHandler).Methods("POST")
 
 	executorAuthedAPI := publicAPIRouter.PathPrefix("/v1/executor").Subrouter()
 	executorAuthedAPI.Use(JSONMiddleware, executor.ExecutorAuthMiddleware)

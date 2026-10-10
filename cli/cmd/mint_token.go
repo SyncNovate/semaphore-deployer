@@ -1,20 +1,16 @@
 package cmd
 
 import (
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/db/factory"
+	"github.com/semaphoreui/semaphore/pkg/enrollment/mint"
 	"github.com/semaphoreui/semaphore/util"
 	"github.com/spf13/cobra"
 
@@ -30,7 +26,7 @@ import (
 //
 // This subcommand REPLACES the manual SQL INSERT workflow that the
 // R-I.10.re1 / R-I.11 live-fork-env verification used. The token TTL
-// is fixed at db.EnrollmentTokenTTL (5 min) per design.
+// is fixed at mint.DefaultTTL (5 min) per design.
 var mintTokenArgs struct {
 	tenantID         string
 	zoneIDs          []string
@@ -48,14 +44,14 @@ func init() {
 		"tenant UUID (required; fail-closed if empty)")
 	mintTokenCmd.PersistentFlags().StringSliceVar(&mintTokenArgs.zoneIDs, "zone-id", nil,
 		"deployment zone IDs (repeat or comma-separated). "+
-				"Empty list = no zones bound (executor cannot claim until assigned).")
+			"Empty list = no zones bound (executor cannot claim until assigned).")
 	mintTokenCmd.PersistentFlags().StringVar(&mintTokenArgs.executorName, "name", "",
 		"proposed executor name (defaults to the executor_id at enroll time)")
 	mintTokenCmd.PersistentFlags().StringVar(&mintTokenArgs.hostname, "hostname", "",
 		"proposed hostname (defaults to the OS hostname at enroll time)")
 	mintTokenCmd.PersistentFlags().StringVar(&mintTokenArgs.installBaseURL, "install-base-url", "",
 		"base URL prepended to the install link (e.g. https://sentraops.example.com). "+
-				"If empty, derives from SEMAPHORE_WEBROOT or SEMAPHORE_PUBLIC_URL env.")
+			"If empty, derives from SEMAPHORE_PUBLIC_URL or util.Config.WebHost.")
 	mintTokenCmd.PersistentFlags().BoolVar(&mintTokenArgs.jsonOutput, "json", false,
 		"emit the result as a single JSON object (machine-parseable)")
 	mintTokenCmd.PersistentFlags().BoolVar(&mintTokenArgs.stdin, "stdin", false,
@@ -96,24 +92,31 @@ tenant_id on the request side.
 
 // mintTokenResult is the JSON shape emitted with --json. Stable shape
 // (consumed by the R-I.9 UI's "Send Executor" button wiring).
+//
+// Re-declared here (instead of reusing mint.Result) so the wire shape
+// stays under CLI control — the JSON tags match mint.Result so the
+// R-I.9 UI parses both equivalently.
 type mintTokenResult struct {
-	Token       string    `json:"token"`         // plaintext; ONLY seen here + in the install bundle
-	TokenHash   string    `json:"token_hash"`    // sha256 hex digest (matches enrollment_tokens.token_hash)
-	TenantID    string    `json:"tenant_id"`
-	ZoneIDs     []string  `json:"zone_ids"`
-	ExecutorName string   `json:"executor_name,omitempty"`
-	Hostname    string    `json:"hostname,omitempty"`
-	ExpiresAt   time.Time `json:"expires_at"`
-	InstallLink string    `json:"install_link"` // full URL with token embedded
+	Token        string    `json:"token"`
+	TokenHash    string    `json:"token_hash"`
+	TenantID     string    `json:"tenant_id"`
+	ZoneIDs      []string  `json:"zone_ids"`
+	ExecutorName string    `json:"executor_name,omitempty"`
+	Hostname     string    `json:"hostname,omitempty"`
+	ExpiresAt    time.Time `json:"expires_at"`
+	CreatedAt    time.Time `json:"created_at"`
+	InstallLink  string    `json:"install_link"`
 }
 
-// runMintToken mints the token, INSERTs it, emits. With --json the
-// shape is stable for the R-I.9 UI. Without --json the output is a
-// single line "Install link: <url>" so operators can copy + paste.
+// runMintToken parses the CLI input, delegates the actual mint to
+// ``mint.Token`` (the shared helper used by the HTTP handler too),
+// and emits the result in the requested shape. Keeping the parse
+// + emit logic in this file but the security-sensitive mint work
+// in the shared package means the two surfaces can't drift on TTL
+// math, URL shape, or row contents.
 func runMintToken(stdout io.Writer) error {
-	// 1. Resolve + validate tenant_id. Std-in flag wins over --flag
-	//    so the same CLI can be driven by an interactive prompt or
-	//    by a CI pipeline reading from a file/pipe.
+	// 1. --stdin branch: the same CLI can be driven by an interactive
+	//    prompt or by a CI pipeline reading from a file/pipe.
 	if mintTokenArgs.stdin {
 		b, err := io.ReadAll(stdinReaderOverride())
 		if err != nil {
@@ -125,12 +128,8 @@ func runMintToken(stdout io.Writer) error {
 		}
 		mintTokenArgs.tenantID = tenantID
 	}
-	if strings.TrimSpace(mintTokenArgs.tenantID) == "" {
-		return fmt.Errorf("--tenant-id is required (or pass --stdin)")
-	}
-
-	// 2. Resolve install base URL. Priority: --install-base-url >
-	//    SEMAPHORE_PUBLIC_URL env > util.Config.WebHost > localhost.
+	// 2. Resolve install base URL (CLI priority order). The shared
+	//    helper re-validates the URL on the way in.
 	base := strings.TrimRight(strings.TrimSpace(mintTokenArgs.installBaseURL), "/")
 	if base == "" {
 		base = strings.TrimSpace(os.Getenv("SEMAPHORE_PUBLIC_URL"))
@@ -138,109 +137,58 @@ func runMintToken(stdout io.Writer) error {
 	if base == "" && util.Config != nil && util.Config.WebHost != "" {
 		base = util.Config.WebHost
 	}
-	if base == "" {
-		return fmt.Errorf("install base URL is unknown; pass --install-base-url or set SEMAPHORE_PUBLIC_URL")
-	}
-	if _, err := url.Parse(base); err != nil {
-		return fmt.Errorf("--install-base-url %q is not a valid URL: %w", base, err)
-	}
 
-	// 3. Generate a 32-byte cryptographically random token. Same
-	//    shape as the executor's existing bearer-token mint
-	//    (executor/client.go's mintToken pattern).
-	var raw [32]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return fmt.Errorf("generate token: %w", err)
-	}
-	plaintext := base64.RawURLEncoding.EncodeToString(raw[:])
-	sum := sha256.Sum256([]byte(plaintext))
-	hashHex := hex.EncodeToString(sum[:])
-
-	// 4. Resolve the created_at + expires_at. Default: now + 5 min.
-	//    Allow --registration-at + --ttl-minutes for testing.
-	now := time.Now().UTC()
-	createdAt := now
+	// 3. Resolve the time anchor (--registration-at for tests;
+	//    time.Now() otherwise). Tests pin this so the
+	//    expires-at assertion is stable.
+	var now time.Time
 	if v := strings.TrimSpace(mintTokenArgs.registrationAt); v != "" {
 		t, err := time.Parse(time.RFC3339, v)
 		if err != nil {
 			return fmt.Errorf("--registration-at must be RFC3339: %w", err)
 		}
-		createdAt = t
+		now = t
 	}
-	ttl := time.Duration(db.EnrollmentTokenTTL)
+	// 4. Resolve TTL (mint.Token will reject anything > MaxTTL).
+	var ttl time.Duration
 	if mintTokenArgs.expiresInMinutes > 0 {
 		ttl = time.Duration(mintTokenArgs.expiresInMinutes) * time.Minute
-		if ttl > 60*time.Minute {
-			return fmt.Errorf("--ttl-minutes may not exceed 60 (the token is a security boundary, not a session cookie)")
-		}
 	}
-	expiresAt := createdAt.Add(ttl)
-
-	// 5. Encode zone IDs as JSON list (matches Executor.DeploymentZoneIDsJSON).
-	zoneJSON, err := json.Marshal(mintTokenArgs.zoneIDs)
-	if err != nil {
-		return fmt.Errorf("marshal zone ids: %w", err)
-	}
-
-	// 6. INSERT via the Store. We use the same Store interface as the
-	//    /enroll handler so the read-path tests on ConsumeEnrollmentToken
-	//    cover both directions. Resolve the store via the package-
-	//    level hook (production: a factory-built connected SqlDb;
-	//    tests: the harness-provided store). Both paths satisfy the
-	//    db.Store interface so /enroll + mint-token share the same
-	//    persistence story.
-	store := resolveStoreForMintToken()
-	if store == nil {
+	// 5. Resolve the store (test hook or factory).
+	s := resolveStoreForMintToken()
+	if s == nil {
 		return fmt.Errorf("store is not configured (set SEMAPHORE_DB_HOST / SEMAPHORE_DB_USER / SEMAPHORE_DB_PASS)")
 	}
-	// We intentionally do NOT close the store here: this is a
-	// short-lived CLI command, the process exits when Run returns,
-	// and closing the SqlDb disconnects any pool the test harness
-	// set up — the test would then panic on the next operation.
-	tok := db.EnrollmentToken{
-		TokenHash:             hashHex,
-		TenantID:              strings.TrimSpace(mintTokenArgs.tenantID),
-		DeploymentZoneIDsJSON: string(zoneJSON),
-		ExecutorName:          strings.TrimSpace(mintTokenArgs.executorName),
-		Hostname:              strings.TrimSpace(mintTokenArgs.hostname),
-		ExpiresAt:             expiresAt,
-		CreatedAt:             createdAt,
-	}
-	if _, err := store.CreateEnrollmentToken(tok); err != nil {
-		return fmt.Errorf("create enrollment token: %w", err)
-	}
-
-	// 7. Compose the install link. Same shape install.sh expects
-	//    (the customer curl-pipes to bash). We intentionally keep
-	//    the URL simple — no path embedding; the bash wrapper reads
-	//    the token from a header or query-string at fetch time. The
-	//    path "/install/<token>" is the documented Wazuh-style
-	//    pattern; install.sh on the server side serves the bundle
-	//    + write-headers + signed installer URL.
-	u, err := url.Parse(base)
+	// 6. Delegate the mint.
+	res, err := mint.Token(s, mint.Request{
+		TenantID:       mintTokenArgs.tenantID,
+		DeploymentZone: mintTokenArgs.zoneIDs,
+		ExecutorName:   mintTokenArgs.executorName,
+		Hostname:       mintTokenArgs.hostname,
+		TTL:            ttl,
+		InstallBaseURL: base,
+		Now:            now,
+	})
 	if err != nil {
-		return fmt.Errorf("parse base url: %w", err)
+		return err
 	}
-	u.Path = strings.TrimRight(u.Path, "/") + "/install/" + plaintext
-	installLink := u.String()
-
-	res := mintTokenResult{
-		Token:        plaintext,
-		TokenHash:    hashHex,
-		TenantID:     tok.TenantID,
-		ZoneIDs:      mintTokenArgs.zoneIDs,
-		ExecutorName: tok.ExecutorName,
-		Hostname:     tok.Hostname,
-		ExpiresAt:    expiresAt,
-		InstallLink:  installLink,
-	}
-
-	// 8. Emit. --json for machine consumers (R-I.9 UI, CI), plain
+	// 7. Emit. --json for machine consumers (R-I.9 UI, CI), plain
 	//    text for human operators.
 	if mintTokenArgs.jsonOutput {
+		out := mintTokenResult{
+			Token:        res.Token,
+			TokenHash:    res.TokenHash,
+			TenantID:     res.TenantID,
+			ZoneIDs:      res.ZoneIDs,
+			ExecutorName: res.ExecutorName,
+			Hostname:     res.Hostname,
+			ExpiresAt:    res.ExpiresAt,
+			CreatedAt:    res.CreatedAt,
+			InstallLink:  res.InstallLink,
+		}
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(res)
+		return enc.Encode(out)
 	}
 	fmt.Fprintf(stdout, "Install link: %s\n", res.InstallLink)
 	fmt.Fprintf(stdout, "Tenant:       %s\n", res.TenantID)
