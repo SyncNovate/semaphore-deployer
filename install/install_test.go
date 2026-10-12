@@ -291,8 +291,13 @@ func TestInstallHandlerUnsupportedOS(t *testing.T) {
 // TestInstallHandlerInternalErrorOnStoreErr returns 500 if
 // the store fails with an unrecognised error.
 func TestInstallHandlerInternalErrorOnStoreErr(t *testing.T) {
-	h, store := newTestHandler()
+	// Build a store that does NOT have the testToken in its
+	// map; the only path the lookup can take is the
+	// defaultErr path. newTestHandler() would pre-add the
+	// token, masking the failure case.
+	store := newFakeStore()
 	store.defaultErr = errors.New("db connection refused")
+	h := NewHandler(store, testServerURL)
 
 	req := httptest.NewRequest(http.MethodGet, "/install/"+testToken+"?os=linux", nil)
 	rec := httptest.NewRecorder()
