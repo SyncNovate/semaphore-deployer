@@ -61,9 +61,11 @@ func Registration(
 	if req.TenantID == "" {
 		return nil, errors.New("executor/registration: tenant_id is required")
 	}
-	if req.DeploymentZoneID == "" {
-		return nil, errors.New("executor/registration: deployment_zone_id is required")
-	}
+	// DeploymentZoneID is OPTIONAL (R-I.9 followup 2026-10-11).
+	// A per-customer install does not bind a zone. The server-side
+	// /register handler still validates the legacy path; the
+	// /enroll path accepts an empty zone. This is the client-side
+	// check that the request body has at least the tenant.
 	if req.ExecutorID == "" {
 		return nil, errors.New("executor/registration: executor_id is required")
 	}

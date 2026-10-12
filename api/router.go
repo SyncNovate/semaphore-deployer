@@ -25,6 +25,7 @@ import (
 	"github.com/semaphoreui/semaphore/api/executor"
 	"github.com/semaphoreui/semaphore/api/middleware"
 	"github.com/semaphoreui/semaphore/api/runners"
+	"github.com/semaphoreui/semaphore/install"
 
 	"github.com/gorilla/mux"
 	"github.com/semaphoreui/semaphore/api/projects"
@@ -204,6 +205,37 @@ func Route(
 	// actor; the JWT carries the BE's tenant scope + the
 	// operator's actor_id for audit attribution.
 	executorAPI.HandleFunc("/enroll-token", executor.EnrollTokenHandler).Methods("POST")
+
+	//
+	// R-D (2026-10-12): per-customer install URL endpoint.
+	// The customer's deploy admin pastes this URL into their
+	// MDM (Intune / Jamf / Ansible Tower) and pushes it to
+	// every machine in the customer's fleet. The handler
+	// serves the platform-specific install script with the
+	// bootstrap token + server URL + tenant ID baked in.
+	//
+	// The route sits OUTSIDE the publicAPIRouter (no JSON
+	// middleware, no /api/ prefix, no auth) because the
+	// customer's deploy admin runs it via curl/iwr as a plain
+	// shell script. The token in the URL IS the auth — the
+	// server hashes the plaintext token and looks the row up
+	// in the enrollment_tokens table.
+	//
+	// The /install URL is on the root router so it lands at
+	// /install/<token> on whatever host:port the fork is
+	// serving. It is NOT prefixed with webPath because the
+	// install link minted by the platform BE's "Send
+	// Executor" flow already points at the right host:port.
+	//
+	installBaseURL := os.Getenv("SENTRAOPS_INSTALL_BASE_URL")
+	if installBaseURL == "" {
+		// Default for the dev VPS. Production deployments
+		// MUST set SENTRAOPS_INSTALL_BASE_URL to the
+		// customer-facing Semaphore URL.
+		installBaseURL = "https://sentraops.5-189-177-170.sslip.io:9443"
+	}
+	installHandler := install.NewHandlerFromDB(store, installBaseURL)
+	r.Path("/install/{token}").Handler(installHandler).Methods("GET")
 
 	executorAuthedAPI := publicAPIRouter.PathPrefix("/v1/executor").Subrouter()
 	executorAuthedAPI.Use(JSONMiddleware, executor.ExecutorAuthMiddleware)

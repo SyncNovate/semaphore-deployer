@@ -35,8 +35,14 @@ type Config struct {
 	TenantID string `yaml:"tenant_id" env:"TENANT_ID" json:"tenant_id"`
 
 	// DeploymentZoneID is the customer's deployment zone UUID.
-	// Hard-rejected by the server if missing.
-	DeploymentZoneID string `yaml:"deployment_zone_id" env:"DEPLOYMENT_ZONE_ID" json:"deployment_zone_id"`
+	// OPTIONAL: 2026-10-11 R-I.9 followup dropped zones from the
+	// SOC surface. A per-customer install does not bind a zone; the
+	// executor's claim path queries by tenant+zone, and a row with
+	// an empty zone matches tasks whose `deployment_zone_id` is also
+	// empty (the V1 post-R-I.9 posture). Legacy executors that
+	// ship with a zone keep working unchanged; the field is here
+	// so the wire shape does not break.
+	DeploymentZoneID string `yaml:"deployment_zone_id,omitempty" env:"DEPLOYMENT_ZONE_ID" json:"deployment_zone_id,omitempty"`
 
 	// ExecutorID is the executor's stable identifier. If empty,
 	// the executor generates a fresh ULID at first start and
@@ -255,9 +261,10 @@ func (c Config) validate() error {
 	if strings.TrimSpace(c.TenantID) == "" {
 		missing = append(missing, "tenant_id")
 	}
-	if strings.TrimSpace(c.DeploymentZoneID) == "" {
-		missing = append(missing, "deployment_zone_id")
-	}
+	// DeploymentZoneID is OPTIONAL (R-I.9 followup 2026-10-11).
+	// A per-customer install does not bind a zone. The server's
+	// /enroll accepts an empty zone; legacy rows with a zone keep
+	// working unchanged.
 	if strings.TrimSpace(c.ClientCertPath) == "" {
 		missing = append(missing, "client_cert_path")
 	}

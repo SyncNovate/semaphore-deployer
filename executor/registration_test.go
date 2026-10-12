@@ -98,13 +98,30 @@ func TestRegistrationRejectsMissingTenant(t *testing.T) {
 	}
 }
 
-// TestRegistrationRejectsMissingZone mirrors the tenant
-// test for deployment_zone_id.
-func TestRegistrationRejectsMissingZone(t *testing.T) {
+// TestRegistrationAcceptsMissingZone verifies the client-side
+// validation does NOT require deployment_zone_id (R-I.9 followup
+// 2026-10-11: zones removed from the SOC surface; the per-customer
+// install path does not bind a zone). The request must reach the
+// server, which decides whether an empty zone is acceptable for
+// the bound tenant.
+//
+// We use an httptest server that returns 204 No Content so the
+// client passes. The point of the test is that Registration does
+// NOT short-circuit on empty DeploymentZoneID at the client side.
+func TestRegistrationAcceptsMissingZone(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	signer := NewEd25519SignerForTest(priv, "executor", "aud")
+	gotZone := "<<unset>>"
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("server should not be called for a missing-zone request")
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			if v, ok := body["deployment_zone_id"].(string); ok {
+				gotZone = v
+			} else {
+				gotZone = "<<absent>>"
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 	client := newTestHTTPClient(t, server)
@@ -112,13 +129,13 @@ func TestRegistrationRejectsMissingZone(t *testing.T) {
 	_, err := Registration(context.Background(), client, signer, RegistrationRequest{
 		ExecutorID: "EXEC-001",
 		TenantID:   "ORG-001",
-		// DeploymentZoneID: "" — should be caught client-side
+		// DeploymentZoneID: "" — must NOT be caught client-side
 	})
-	if err == nil {
-		t.Error("Registration should reject missing deployment_zone_id")
+	if err != nil {
+		t.Errorf("Registration should accept empty deployment_zone_id (got: %v)", err)
 	}
-	if !strings.Contains(err.Error(), "deployment_zone_id") {
-		t.Errorf("error = %q, want mentions deployment_zone_id", err.Error())
+	if gotZone != "" && gotZone != "<<absent>>" {
+		t.Errorf("server received deployment_zone_id = %q, want \"\" (omitted) or absent", gotZone)
 	}
 }
 

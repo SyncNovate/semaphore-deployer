@@ -24,13 +24,18 @@
 #   SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN   The single-use enrollment token
 #   SENTRAOPS_EXECUTOR_SERVER_URL        The SentraOps server URL
 #   SENTRAOPS_EXECUTOR_TENANT_ID         The customer's tenant ID
-#   SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID  The customer's deployment zone
 #   SENTRAOPS_EXECUTOR_BINARY_URL        Where to download the executor binary
 #                                          (default: <server_url>/download/executor-linux-amd64)
 #
 # R-I.10.re3: combined installer + first-boot bootstrap (Wazuh-style).
 # R-I.5 (Linux playbook) updated to call this script instead of doing
 # the install inline.
+#
+# R-D (2026-10-12): the per-customer install path no longer binds a
+# deployment zone. The customer supplies nothing at install time; the
+# signed bootstrap URL is the customer's identity. The executor's
+# /enroll accepts an empty zone. This matches the 2026-10-11 R-I.9
+# followup conclusion.
 
 set -euo pipefail
 
@@ -53,9 +58,11 @@ ok() { log "${GRN}✓${RST} $*"; }
 : "${SENTRAOPS_EXECUTOR_SERVER_URL:?missing SENTRAOPS_EXECUTOR_SERVER_URL}"
 : "${SENTRAOPS_EXECUTOR_TENANT_ID:?missing SENTRAOPS_EXECUTOR_TENANT_ID}"
 
-if [[ -z "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID:-}" ]]; then
-  fail "missing SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID"
-fi
+# R-D (2026-10-12): SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID removed.
+# The per-customer install path does not bind a zone. A legacy
+# operator who still sets the env var keeps it; the line below
+# forwards it to the config if present (optional, no error if
+# empty).
 
 # System paths. Mode 0700 on the install dir so the cert is
 # owner-only-accessed.
@@ -92,7 +99,17 @@ cat > "${CONFIG_PATH}" <<EOF
 # exchange so a stolen disk image cannot replay it.
 server_url: "${SENTRAOPS_EXECUTOR_SERVER_URL}"
 tenant_id: "${SENTRAOPS_EXECUTOR_TENANT_ID}"
-deployment_zone_id: "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID}"
+EOF
+
+# R-D (2026-10-12): deployment_zone_id is OPTIONAL. Per-customer
+# installs do not bind a zone. Forward the env var if the operator
+# sets it; otherwise omit the line so the executor's config
+# validate() accepts the file.
+if [[ -n "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID:-}" ]]; then
+  printf 'deployment_zone_id: "%s"\n' "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID}" >> "${CONFIG_PATH}"
+fi
+
+cat >> "${CONFIG_PATH}" <<EOF
 client_cert_path: "${CERT_PATH}"
 client_key_path: "${KEY_PATH}"
 server_ca_file: "${CA_PATH}"
@@ -228,5 +245,12 @@ log "Config + cert live at:"
 log "  ${INSTALL_DIR}/"
 log ""
 log "Tenant: ${SENTRAOPS_EXECUTOR_TENANT_ID}"
-log "Zone:   ${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID}"
+# R-D (2026-10-12): zone is OPTIONAL. Print it only if the operator
+# still sets the env var (legacy bundles, future zones). The line
+# below falls back to "(none)" so the report stays consistent.
+if [[ -n "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID:-}" ]]; then
+  log "Zone:   ${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID}"
+else
+  log "Zone:   (none — per-customer install, R-D 2026-10-12)"
+fi
 log "Server: ${SENTRAOPS_EXECUTOR_SERVER_URL}"
