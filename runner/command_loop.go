@@ -339,7 +339,7 @@ func (l *CommandLoop) uninstallerCommand(reason string) (string, []string, error
 		return "", nil, fmt.Errorf("runner/command_loop: install dir is empty")
 	}
 	var script string
-	switch runtime.GOOS() {
+	switch runtime.GOOS {
 	case "darwin":
 		script = installDir + "/runner_uninstall-macos.sh"
 	case "windows":

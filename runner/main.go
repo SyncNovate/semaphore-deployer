@@ -112,7 +112,7 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	// (those belong to the executor). The loop runs on its
 	// own goroutine; this function blocks on signal.
 	loop := NewCommandLoop(
-		cfg,
+		*cfg,
 		platform,
 		func() string { return cfg.RunnerID },
 		cfg.TenantID,
