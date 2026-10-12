@@ -98,6 +98,33 @@ type Config struct {
 
 	// SecretStoreVaultMount is the Vault KV v2 mount point.
 	// Defaults to "secret" when empty.
+
+	// InstallDir is the on-disk directory where the install
+	// scripts dropped the executor + certs + config + the
+	// platform-specific uninstaller. The command loop reads
+	// this to locate the uninstaller (install.sh →
+	// /etc/sentraops-executor/uninstall.sh on Linux;
+	// install-macos.sh → /etc/sentraops-executor/uninstall-macos.sh;
+	// install.ps1 → C:\Program Files\SentraOps\uninstall.ps1).
+	// If empty, the loop falls back to the GOOS-specific
+	// default in defaultInstallDir().
+	InstallDir string `yaml:"install_dir,omitempty" env:"INSTALL_DIR" json:"install_dir,omitempty"`
+
+	// PlatformAPIKeyPath is the on-disk path to the shared
+	// secret the executor sends to the platform BE on every
+	// command-inbox call (R-I.12.a). Written by the install
+	// scripts at mode 0600; the PlatformClient fails loud if
+	// the file is missing or has wider perms.
+	PlatformAPIKeyPath string `yaml:"platform_api_key_path,omitempty" env:"PLATFORM_API_KEY_PATH" json:"platform_api_key_path,omitempty"`
+
+	// KillSwitchPath is the on-disk path to the pre-shared
+	// kill switch (R-I.12.b edge path). The command loop
+	// checks the file on every poll and triggers an immediate
+	// self-destruct if the file's content can be decrypted
+	// with the platform's public key. The install script
+	// writes the file at mode 0600 with the encrypted
+	// one-time-use key.
+	KillSwitchPath string `yaml:"kill_switch_path,omitempty" env:"KILL_SWITCH_PATH" json:"kill_switch_path,omitempty"`
 	SecretStoreVaultMount string `yaml:"secret_store_vault_mount,omitempty" env:"SECRET_STORE_VAULT_MOUNT" json:"secret_store_vault_mount,omitempty"`
 
 	// LogLevel is the structured-logger level (debug / info /

@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/semaphoreui/semaphore/executor/commands"
 )
 
 // Executor is the top-level customer-side process. It owns the
@@ -33,6 +35,7 @@ import (
 type Executor struct {
 	cfg          Config
 	client       *HTTPClient
+	platform     commands.HTTPDoer // R-I.12.b: platform BE inbox client (shared-key HTTPS)
 	signer       Signer
 	secrets      SecretStore
 	bearerToken  string
@@ -41,6 +44,14 @@ type Executor struct {
 	zoneID       string
 	logger       *logrus.Logger
 	logTailBytes int
+
+	// commandLoop is the R-I.12.b goroutine that polls
+	// the platform BE's command inbox (uninstall, future
+	// rotate_cert, ...). Optional — only constructed when
+	// a PlatformClient is wired (i.e. a shared-key file
+	// was found at install time). nil in unit tests that
+	// don't care about the command surface.
+	commandLoop *CommandLoop
 
 	// startOnce + stopOnce enforce the "Start once, Shutdown
 	// once" contract; a panic from `go executor.Start()`
@@ -66,6 +77,23 @@ type Executor struct {
 func NewExecutor(
 	cfg Config,
 	client *HTTPClient,
+	signer Signer,
+	secrets SecretStore,
+	logger *logrus.Logger,
+) (*Executor, error) {
+	return NewExecutorWithPlatform(cfg, client, nil, signer, secrets, logger)
+}
+
+// NewExecutorWithPlatform is NewExecutor + a platform
+// client (R-I.12.b). The platform client is what the
+// command loop uses to poll the BE's command inbox. Pass
+// nil if the executor is running in a context where the
+// command surface is disabled (legacy installs without an
+// api_key file; tests that don't exercise the surface).
+func NewExecutorWithPlatform(
+	cfg Config,
+	client *HTTPClient,
+	platform commands.HTTPDoer,
 	signer Signer,
 	secrets SecretStore,
 	logger *logrus.Logger,
@@ -97,9 +125,10 @@ func NewExecutor(
 		// response; here we treat empty as "let
 		// registration assign one".
 	}
-	return &Executor{
+	exec := &Executor{
 		cfg:          cfg,
 		client:       client,
+		platform:     platform,
 		signer:       signer,
 		secrets:      resolvedSecrets,
 		tenantID:     cfg.TenantID,
@@ -109,7 +138,19 @@ func NewExecutor(
 		logTailBytes: 64 * 1024,
 		stopCh:       make(chan struct{}),
 		doneCh:       make(chan struct{}),
-	}, nil
+	}
+	// The command loop is wired only when a platform client
+	// is available. nil platform = legacy install or test
+	// fixture; the loop simply doesn't run.
+	if platform != nil {
+		exec.commandLoop = NewCommandLoop(
+			cfg, platform,
+			func() string { return exec.ExecutorID() },
+			cfg.TenantID,
+			logger,
+		)
+	}
+	return exec, nil
 }
 
 // BearerToken returns the bearer token from a successful
@@ -160,6 +201,14 @@ func (e *Executor) Start(ctx context.Context) error {
 
 		// 2. Heartbeat loop (background goroutine).
 		go e.heartbeatLoop(ctx)
+
+		// 2a. Command loop (R-I.12.b) — polls the platform
+		// BE's command inbox on the same HeartbeatInterval.
+		// Only started when a platform client was wired at
+		// NewExecutorWithPlatform time.
+		if e.commandLoop != nil {
+			go e.commandLoop.Start(ctx)
+		}
 
 		// 3. Claim loop (blocking). The orchestrator blocks
 		// here until ctx is cancelled; the heartbeat loop
