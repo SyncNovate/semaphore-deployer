@@ -64,10 +64,23 @@ type Result struct {
 }
 
 // MaxTTL is the upper bound the CLI enforces and the HTTP handler
-// re-validates. Anything > 60 min is a security boundary violation;
-// the token is a single-use bootstrap credential, not a session
-// cookie. A larger TTL weakens the 5-min stolen-token response window.
-const MaxTTL = 60 * time.Minute
+// re-validates.
+//
+// R-D (2026-10-12): the per-customer install path needs a longer
+// window because the customer's deploy admin pushes the install
+// URL to every machine in the customer's fleet via their existing
+// MDM (Intune / Jamf / Ansible Tower). The push can take hours;
+// a 60-min cap breaks the per-customer flow for any customer with
+// more than a handful of machines.
+//
+// The security argument for the cap (R-I.10) was that a stolen
+// token has a smaller window to be replayed. The per-customer
+// path relaxes this: the token is bound to a specific tenant,
+// and a stolen token still only enrolls machines in that
+// tenant (the tenant scope is the security boundary, not the
+// TTL). 7 days is the BE's upper cap; we mirror it here so the
+// per-customer path works end-to-end.
+const MaxTTL = 7 * 24 * time.Hour
 
 // DefaultTTL mirrors ``db.EnrollmentTokenTTL`` so callers that
 // don't pass a TTL explicitly get the same shape the
