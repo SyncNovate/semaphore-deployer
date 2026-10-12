@@ -243,10 +243,9 @@ func (l *CommandLoop) ack(ctx context.Context, cmd commands.Command, outcome Ack
 	}
 	_, err := commands.NewClient(l.platform).Ack(ctx, eid, cmd.CommandID, outcome.Status, outcome.Message)
 	if err != nil {
-		l.statsMu.Lock()
-		l.commandsFailed++
-		l.statsMu.Unlock()
-		// 404 means the command was deleted; the loop drops it.
+		// 404 means the command was deleted; the loop drops it
+		// without counting it as a failure (no point retrying).
+		// Tested by TestCommandLoop_Ack404_NotCountedAsFailure.
 		if errors.Is(err, commands.ErrCommandNotFound) {
 			l.logger.WithField("command_id", cmd.CommandID).
 				Warn("executor/command_loop: ack 404, command was deleted — dropping")
@@ -257,6 +256,12 @@ func (l *CommandLoop) ack(ctx context.Context, cmd commands.Command, outcome Ack
 			l.logger.WithError(err).Error("executor/command_loop: ack rejected with 401, hard stop")
 			return
 		}
+		// All other failures: 5xx, network, malformed body, etc.
+		// Counted as a failure so the test surface can assert
+		// the loop's error rate; the next tick is free to retry.
+		l.statsMu.Lock()
+		l.commandsFailed++
+		l.statsMu.Unlock()
 		l.logger.WithError(err).WithField("command_id", cmd.CommandID).
 			Warn("executor/command_loop: ack failed")
 		return
