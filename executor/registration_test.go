@@ -105,9 +105,10 @@ func TestRegistrationRejectsMissingTenant(t *testing.T) {
 // server, which decides whether an empty zone is acceptable for
 // the bound tenant.
 //
-// We use an httptest server that returns 204 No Content so the
-// client passes. The point of the test is that Registration does
-// NOT short-circuit on empty DeploymentZoneID at the client side.
+// We use an httptest server that returns 201 Created so the
+// client's status check passes. The point of the test is that
+// Registration does NOT short-circuit on empty DeploymentZoneID
+// at the client side.
 func TestRegistrationAcceptsMissingZone(t *testing.T) {
 	_, priv, _ := ed25519.GenerateKey(rand.Reader)
 	signer := NewEd25519SignerForTest(priv, "executor", "aud")
@@ -121,7 +122,7 @@ func TestRegistrationAcceptsMissingZone(t *testing.T) {
 				gotZone = "<<absent>>"
 			}
 		}
-		w.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(http.StatusCreated)
 	}))
 	defer server.Close()
 	client := newTestHTTPClient(t, server)
