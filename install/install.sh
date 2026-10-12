@@ -27,15 +27,10 @@
 #   SENTRAOPS_EXECUTOR_BINARY_URL        Where to download the executor binary
 #                                          (default: <server_url>/download/executor-linux-amd64)
 #
-# R-I.10.re3: combined installer + first-boot bootstrap (Wazuh-style).
-# R-I.5 (Linux playbook) updated to call this script instead of doing
-# the install inline.
-#
-# R-D (2026-10-12): the per-customer install path no longer binds a
-# deployment zone. The customer supplies nothing at install time; the
-# signed bootstrap URL is the customer's identity. The executor's
-# /enroll accepts an empty zone. This matches the 2026-10-11 R-I.9
-# followup conclusion.
+# Wazuh-style 1-line install: combined installer + first-boot
+# bootstrap. The customer runs `curl -sSL <url> | sudo bash`
+# from the SOC operator's email — no flags, no decisions.
+# The signed bootstrap URL is the customer's identity.
 
 set -euo pipefail
 
@@ -58,11 +53,9 @@ ok() { log "${GRN}✓${RST} $*"; }
 : "${SENTRAOPS_EXECUTOR_SERVER_URL:?missing SENTRAOPS_EXECUTOR_SERVER_URL}"
 : "${SENTRAOPS_EXECUTOR_TENANT_ID:?missing SENTRAOPS_EXECUTOR_TENANT_ID}"
 
-# R-D (2026-10-12): SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID removed.
-# The per-customer install path does not bind a zone. A legacy
-# operator who still sets the env var keeps it; the line below
-# forwards it to the config if present (optional, no error if
-# empty).
+# Per-customer installs do not bind a zone. A legacy operator
+# who still sets the env var keeps it; we forward it to the
+# config if present (optional, no error if empty).
 
 # System paths. Mode 0700 on the install dir so the cert is
 # owner-only-accessed.
@@ -101,10 +94,9 @@ server_url: "${SENTRAOPS_EXECUTOR_SERVER_URL}"
 tenant_id: "${SENTRAOPS_EXECUTOR_TENANT_ID}"
 EOF
 
-# R-D (2026-10-12): deployment_zone_id is OPTIONAL. Per-customer
-# installs do not bind a zone. Forward the env var if the operator
-# sets it; otherwise omit the line so the executor's config
-# validate() accepts the file.
+# Per-customer installs do not bind a zone. Forward the env var
+# if the operator sets it; otherwise omit the line so the
+# executor's config validate() accepts the file.
 if [[ -n "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID:-}" ]]; then
   printf 'deployment_zone_id: "%s"\n' "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID}" >> "${CONFIG_PATH}"
 fi
@@ -113,10 +105,10 @@ cat >> "${CONFIG_PATH}" <<EOF
 client_cert_path: "${CERT_PATH}"
 client_key_path: "${KEY_PATH}"
 server_ca_file: "${CA_PATH}"
-# R-I.12.b: shared-key path to the platform BE's command
-# inbox. The install script writes the api_key to a separate
-# file (mode 0600) and the executor reads it at startup.
-# A leaked file is a fully-scoped shared secret, not a
+# Shared-key path to the platform BE's command inbox. The
+# install script writes the api_key to a separate file
+# (mode 0600) and the executor reads it at startup. A
+# leaked file is a fully-scoped shared secret, not a
 # session for a different system.
 install_dir: "${INSTALL_DIR}"
 platform_api_key_path: "${INSTALL_DIR}/api_key"
@@ -127,9 +119,9 @@ EOF
 chmod 0600 "${CONFIG_PATH}"
 ok "Wrote config to ${CONFIG_PATH} (mode 0600)"
 
-# R-I.12.b: write the platform API key (shared secret) to a
-# separate file the executor reads at startup. The install
-# script gets the key from the platform BE during bootstrap
+# Write the platform API key (shared secret) to a separate
+# file the executor reads at startup. The install script gets
+# the key from the platform BE during bootstrap
 # exchange; the executor's PlatformClient enforces mode 0600
 # at runtime. The key is rotated by re-running install.sh.
 if [[ -n "${SENTRAOPS_EXECUTOR_PLATFORM_API_KEY:-}" ]]; then
@@ -137,18 +129,17 @@ if [[ -n "${SENTRAOPS_EXECUTOR_PLATFORM_API_KEY:-}" ]]; then
   chmod 0600 "${INSTALL_DIR}/api_key"
   ok "Wrote platform API key to ${INSTALL_DIR}/api_key (mode 0600)"
 else
-  warn "SENTRAOPS_EXECUTOR_PLATFORM_API_KEY not set; the executor will start but the platform command inbox will be unreachable. Re-run install.sh with the key in the env to enable R-I.12.b."
+  warn "SENTRAOPS_EXECUTOR_PLATFORM_API_KEY not set; the executor will start but the platform command inbox will be unreachable. Re-run install.sh with the key in the env to enable it."
 fi
 
-# R-I.12.b: pre-shared kill switch. The install script mints
-# a one-time-use key locally, encrypts it with the platform's
-# public key, and writes the encrypted blob to a known
-# location. The executor's command loop decrypts + checks
-# the file on every poll; a valid kill switch triggers an
-# immediate self-destruct without waiting for the platform
-# BE to push the uninstall command. This is the R-I.12.b
-# edge path for endpoints that have lost mTLS but are still
-# online enough to run a side-channel timer.
+# Pre-shared kill switch. The install script mints a one-time-use
+# key locally, encrypts it with the platform's public key, and
+# writes the encrypted blob to a known location. The executor's
+# command loop decrypts + checks the file on every poll; a
+# valid kill switch triggers an immediate self-destruct without
+# waiting for the platform BE to push the uninstall command.
+# This is the edge path for endpoints that have lost mTLS but
+# are still online enough to run a side-channel timer.
 if [[ -n "${SENTRAOPS_EXECUTOR_PLATFORM_PUBLIC_KEY_PEM:-}" ]]; then
   # Generate a 32-byte one-time-use kill token. Encode as
   # base64, encrypt with the platform's RSA / Ed25519
@@ -167,24 +158,23 @@ if [[ -n "${SENTRAOPS_EXECUTOR_PLATFORM_PUBLIC_KEY_PEM:-}" ]]; then
   chmod 0600 "${INSTALL_DIR}/kill_switch"
   ok "Wrote kill switch to ${INSTALL_DIR}/kill_switch (mode 0600)"
 else
-  warn "SENTRAOPS_EXECUTOR_PLATFORM_PUBLIC_KEY_PEM not set; kill switch disabled. Re-run install.sh to enable R-I.12.b edge path."
+  warn "SENTRAOPS_EXECUTOR_PLATFORM_PUBLIC_KEY_PEM not set; kill switch disabled. Re-run install.sh to enable the edge path."
 fi
 
 # ---- 3. Ship the uninstallers ---------------------------------------
-# R-I.12.b: the orchestrator's command loop invokes the
-# platform-specific uninstaller on a SOC operator's uninstall
-# click. The install script copies the uninstallers from
-# the install bundle into the install dir so the executor
-# can find them at <install_dir>/uninstall.{sh,macos.sh,ps1}
-# regardless of where the install bundle was downloaded
-# from.
+# The orchestrator's command loop invokes the platform-specific
+# uninstaller on a SOC operator's uninstall click. The install
+# script copies the uninstallers from the install bundle into
+# the install dir so the executor can find them at
+# <install_dir>/uninstall.{sh,macos.sh,ps1} regardless of
+# where the install bundle was downloaded from.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 for u in uninstall.sh uninstall-macos.sh; do
   if [[ -f "${SCRIPT_DIR}/${u}" ]]; then
     install -m 0700 "${SCRIPT_DIR}/${u}" "${INSTALL_DIR}/${u}"
     ok "shipped ${u} to ${INSTALL_DIR}/${u}"
   else
-    warn "${u} not found in install bundle (${SCRIPT_DIR}); R-I.12.b uninstall will fail until this is present"
+    warn "${u} not found in install bundle (${SCRIPT_DIR}); uninstall will fail until this is present"
   fi
 done
 
@@ -203,7 +193,9 @@ RestartSec=10s
 User=root
 Group=root
 
-# Hardening (matches R-I.6's systemd unit shape — keep consistent).
+# Hardening: lock down the service so a compromised executor
+# cannot escalate. Matches the systemd unit shape used by the
+# SentraOps deployment daemon.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -245,12 +237,13 @@ log "Config + cert live at:"
 log "  ${INSTALL_DIR}/"
 log ""
 log "Tenant: ${SENTRAOPS_EXECUTOR_TENANT_ID}"
-# R-D (2026-10-12): zone is OPTIONAL. Print it only if the operator
-# still sets the env var (legacy bundles, future zones). The line
-# below falls back to "(none)" so the report stays consistent.
+# Per-customer installs do not bind a zone. Print the zone
+# only if the operator still sets the env var (legacy bundles
+# or future per-machine zones). Falls back to "(none)" so the
+# report stays consistent.
 if [[ -n "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID:-}" ]]; then
   log "Zone:   ${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID}"
 else
-  log "Zone:   (none — per-customer install, R-D 2026-10-12)"
+  log "Zone:   (none — per-customer install)"
 fi
 log "Server: ${SENTRAOPS_EXECUTOR_SERVER_URL}"

@@ -27,39 +27,63 @@
 #   $env:SENTRAOPS_EXECUTOR_TENANT_ID         The customer's tenant ID
 #   $env:SENTRAOPS_EXECUTOR_BINARY_URL        Where to download the executor binary
 #
-# R-I.10.re3: combined installer + first-boot bootstrap (Wazuh-style).
-# R-I.5 (Windows playbook) updated to call this script instead of
-# doing the install inline.
-#
-# R-D (2026-10-12): the per-customer install path no longer binds a
-# deployment zone. The customer supplies nothing at install time; the
-# signed bootstrap URL is the customer's identity. The executor's
-# /enroll accepts an empty zone. This matches the 2026-10-11 R-I.9
-# followup conclusion.
+# Wazuh-style 1-line install: combined installer + first-boot
+# bootstrap. The customer runs `iex (irm '...?os=windows')`
+# from the SOC operator's email — no flags, no decisions.
+# The signed bootstrap URL is the customer's identity.
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true)][string]$BootstrapToken,
-    [Parameter(Mandatory=$true)][string]$ServerURL,
-    [Parameter(Mandatory=$true)][string]$TenantID,
-    [string]$DeploymentZoneID,  # R-D (2026-10-12): OPTIONAL. Per-customer
-                                # installs do not bind a zone. Kept for
-                                # backward compat with legacy bundles that
-                                # still pass it.
-    [string]$BinaryURL,
-    [string]$InstallDir = "${env:ProgramData}\SentraOps\Executor",
-    [string]$BinaryPath = "$InstallDir\sentraops-executor.exe",
-    [string]$ConfigPath = "$InstallDir\config.yaml",
-    [string]$CertPath   = "$InstallDir\cert.pem",
-    [string]$KeyPath    = "$InstallDir\key.pem",
-    [string]$CAPath     = "$InstallDir\ca.pem",
-    [string]$ServiceName = "SentraOpsExecutor"
+    # The three primary inputs default to the env vars the
+    # install endpoint pre-bakes into the script. The
+    # Wazuh-style 1-line invocation pattern is
+    # `iex (irm '...?os=windows')` — the customer passes
+    # no parameters. Making BootstrapToken / ServerURL /
+    # TenantID Mandatory here would break that pattern
+    # (PowerShell raises MissingMandatoryParameter before
+    # the env vars are read). The env-var default keeps
+    # the 1-line install working AND lets an operator
+    # override per-invocation if needed.
+    [string]$BootstrapToken = $env:SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN,
+    [string]$ServerURL      = $env:SENTRAOPS_EXECUTOR_SERVER_URL,
+    [string]$TenantID       = $env:SENTRAOPS_EXECUTOR_TENANT_ID,
+    [string]$DeploymentZoneID,  # OPTIONAL. Per-customer installs do
+                                # not bind a zone. Kept for backward
+                                # compat with legacy bundles that still
+                                # pass it.
+    [string]$BinaryURL      = $env:SENTRAOPS_EXECUTOR_BINARY_URL,
+    [string]$InstallDir     = "${env:ProgramData}\SentraOps\Executor",
+    [string]$BinaryPath     = "$InstallDir\sentraops-executor.exe",
+    [string]$ConfigPath     = "$InstallDir\config.yaml",
+    [string]$CertPath       = "$InstallDir\cert.pem",
+    [string]$KeyPath        = "$InstallDir\key.pem",
+    [string]$CAPath         = "$InstallDir\ca.pem",
+    [string]$ServiceName    = "SentraOpsExecutor"
 )
 
 $ErrorActionPreference = "Stop"
 
 function Write-Ok  { param($m) Write-Host "✓ $m" -ForegroundColor Green }
 function Write-Err { param($m) Write-Host "ERROR: $m" -ForegroundColor Red; exit 1 }
+
+# Guard: when the customer runs the Wazuh-style 1-line install
+# (`iex (irm '...?os=windows')`), no parameters are passed and
+# the params default to the pre-baked env vars. If the env vars
+# are also empty, fail loudly with a clear remediation message
+# instead of writing a half-baked config.yaml.
+if (-not $BootstrapToken -or -not $ServerURL -or -not $TenantID) {
+    Write-Err @"
+missing one of: SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN, SENTRAOPS_EXECUTOR_SERVER_URL, SENTRAOPS_EXECUTOR_TENANT_ID.
+
+The Wazuh-style 1-line install is:
+    iex (irm 'https://sentraops.5-189-177-170.sslip.io:9443/install/<token>?os=windows')
+
+If you are running the script by hand, set the env vars first:
+    `$env:SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN = '<token>'
+    `$env:SENTRAOPS_EXECUTOR_SERVER_URL      = 'https://sentraops.5-189-177-170.sslip.io:9443'
+    `$env:SENTRAOPS_EXECUTOR_TENANT_ID       = '<tenant-id>'
+"@
+}
 
 if (-not $BinaryURL) { $BinaryURL = "$($ServerURL.TrimEnd('/'))/download/executor-windows-amd64.exe" }
 
@@ -94,10 +118,10 @@ try {
 Write-Ok "Installed executor binary to $BinaryPath"
 
 # ---- 3. Write the config.yaml ----------------------------------------
-# R-D (2026-10-12): deployment_zone_id is OPTIONAL. Per-customer
-# installs do not bind a zone. Forward the param if the operator
-# sets it; otherwise omit the line so the executor's config
-# validate() accepts the file.
+# deployment_zone_id is OPTIONAL. Per-customer installs do
+# not bind a zone. Forward the param if the operator sets it;
+# otherwise omit the line so the executor's config validate()
+# accepts the file.
 $zoneLine = ""
 if ($DeploymentZoneID) {
     $zoneLine = "deployment_zone_id: `"$DeploymentZoneID`"`r`n"
@@ -111,12 +135,11 @@ tenant_id: "$TenantID"
 $zoneLineclient_cert_path: "$CertPath"
 client_key_path: "$KeyPath"
 server_ca_file: "$CAPath"
-# R-I.12.b: shared-key path to the platform BE's command
-# inbox. The install script writes the api_key to a
-# separate file (Administrators + SYSTEM only ACL) and
-# the executor reads it at startup. A leaked file is a
-# fully-scoped shared secret, not a session for a
-# different system.
+# Shared-key path to the platform BE's command inbox. The
+# install script writes the api_key to a separate file
+# (Administrators + SYSTEM only ACL) and the executor reads
+# it at startup. A leaked file is a fully-scoped shared
+# secret, not a session for a different system.
 install_dir: "$InstallDir"
 platform_api_key_path: "$InstallDir\api_key"
 kill_switch_path: "$InstallDir\kill_switch"
@@ -131,7 +154,10 @@ $rules | ForEach-Object { $acl.AddAccessRule($_) }
 Set-Acl $ConfigPath $acl
 Write-Ok "Wrote config to $ConfigPath (ACL: Administrators + SYSTEM only)"
 
-# R-I.12.b: write the platform API key (shared secret) to
+# Write the platform API key (shared secret) to a separate file
+# the executor reads at startup. The install script gets the
+# key from the platform BE during bootstrap, then writes it
+# here with an Administrators + SYSTEM only ACL.
 # a separate file the executor reads at startup. The
 # install script gets the key from the platform BE during
 # the bootstrap exchange; the executor's PlatformClient
@@ -146,10 +172,17 @@ if ($env:SENTRAOPS_EXECUTOR_PLATFORM_API_KEY) {
     Set-Acl $apiKeyPath $acl
     Write-Ok "Wrote platform API key to $apiKeyPath (ACL: Administrators + SYSTEM only)"
 } else {
-    Write-Warning "SENTRAOPS_EXECUTOR_PLATFORM_API_KEY not set; the executor will start but the platform command inbox will be unreachable. Re-run install.ps1 with the key in the env to enable R-I.12.b."
+    Write-Warning "SENTRAOPS_EXECUTOR_PLATFORM_API_KEY not set; the executor will start but the platform command inbox will be unreachable. Re-run install.ps1 with the key in the env to enable it."
 }
 
-# R-I.12.b: pre-shared kill switch. The install script
+# Pre-shared kill switch. The install script mints a one-time-use
+# key locally, encrypts it with the platform's public key, and
+# writes the encrypted blob to a known location. The executor's
+# command loop decrypts + checks the file on every poll; a
+# valid kill switch triggers an immediate self-destruct without
+# waiting for the platform BE to push the uninstall command.
+# This is the edge path for endpoints that have lost mTLS but
+# are still online enough to run a side-channel timer.
 # mints a 32-byte one-time-use token, writes a sentinel
 # "v1:<base64>" file at the kill_switch path. The
 # executor's command loop decrypts + checks the file on
@@ -168,7 +201,12 @@ $rules | ForEach-Object { $acl.AddAccessRule($_) }
 Set-Acl $killSwitchPath $acl
 Write-Ok "Wrote kill switch to $killSwitchPath (ACL: Administrators + SYSTEM only)"
 
-# R-I.12.b: ship the platform-specific uninstaller into
+# Ship the platform-specific uninstaller into the install
+# dir. The executor's command loop invokes the uninstaller
+# on a SOC operator's uninstall click. We copy from the
+# install bundle so the executor can find it at
+# <install_dir>/uninstall.ps1 regardless of where the
+# install bundle was downloaded from.
 # the install dir so the executor's command loop can find
 # it at <install_dir>\uninstall.ps1.
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -183,7 +221,7 @@ if (Test-Path $uninstallerSrc) {
     Set-Acl $uninstallerDst $acl
     Write-Ok "Shipped uninstaller to $uninstallerDst (ACL: Administrators + SYSTEM only)"
 } else {
-    Write-Warning "uninstall.ps1 not found in install bundle ($scriptDir); R-I.12.b uninstall will fail until this is present"
+    Write-Warning "uninstall.ps1 not found in install bundle ($scriptDir); uninstall will fail until this is present"
 }
 
 # ---- 4. Install the Windows service via NSSM ------------------------
@@ -223,12 +261,15 @@ Write-Host "  Get-EventLog -LogName Application -Source $ServiceName -Newest 20"
 Write-Host "  & '$BinaryPath' --dry-run --config '$ConfigPath'"
 Write-Host ""
 Write-Host "Tenant: ${TenantID}"
-# R-D (2026-10-12): zone is OPTIONAL. Print it only if the operator
+# Per-customer installs do not bind a zone. Print the zone
+# only if the operator still passes the param (legacy bundles
+# or future per-machine zones). Falls back to "(none)" so the
+# report stays consistent.
 # still passes the param (legacy bundles, future zones). The line
 # below falls back to "(none)" so the report stays consistent.
 if ($DeploymentZoneID) {
     Write-Host "Zone:   ${DeploymentZoneID}"
 } else {
-    Write-Host "Zone:   (none — per-customer install, R-D 2026-10-12)"
+    Write-Host "Zone:   (none — per-customer install)"
 }
 Write-Host "Server: ${ServerURL}"
