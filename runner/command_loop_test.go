@@ -66,6 +66,11 @@ func httptestResp(status int, body []byte) *http.Response {
 	r := httptest.NewRecorder()
 	if body != nil {
 		r.Body.Write(body)
+	} else if status >= 200 && status < 300 {
+		// Default success body: a valid JSON object so the
+		// commands.Client decoders don't trip on EOF. The
+		// executor's test helper does the same; mirror it.
+		r.Body.WriteString(`{"command_id":"","executor_id":"","acked_at":"2026-10-12T10:00:00Z","ack_status":"success","ack_message":""}`)
 	}
 	r.Code = status
 	r.Header().Set("Content-Type", "application/json")
@@ -335,7 +340,6 @@ func TestCommandLoop_CheckKillSwitch_OnlyValidSentinel(t *testing.T) {
 }
 
 func TestCommandLoop_UninstallerCommand_PicksPlatformPath(t *testing.T) {
-	installDir := "/etc/sentraops-runner"
 	loop := newTestLoop(t, &recordingDoer{})
 	script, args, err := loop.uninstallerCommand("test reason")
 	if err != nil {
@@ -348,8 +352,11 @@ func TestCommandLoop_UninstallerCommand_PicksPlatformPath(t *testing.T) {
 	if len(args) != 1 || args[0] != "test reason" {
 		t.Fatalf("expected [test reason]; got %v", args)
 	}
-	if !strings.HasPrefix(script, installDir) {
-		t.Fatalf("expected script to start with %q; got %q", installDir, script)
+	// newTestLoop sets InstallDir to t.TempDir(), so the
+	// uninstaller path is rooted there. We just check the
+	// tail + that the dir is non-empty.
+	if !strings.HasPrefix(script, loop.cfg.InstallDir) {
+		t.Fatalf("expected script to start with %q; got %q", loop.cfg.InstallDir, script)
 	}
 }
 
