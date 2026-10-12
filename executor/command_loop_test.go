@@ -252,6 +252,114 @@ func TestCommandLoop_NoExecutorID_TickSkips(t *testing.T) {
 	}
 }
 
+// TestCommandLoop_KillSwitch_TriggersImmediateUninstall
+// confirms the R-I.12.b edge path: when the kill-switch
+// file is present with the v1: sentinel, the command loop
+// skips the BE poll and dispatches a synthetic uninstall
+// command locally. The handler runs the platform-specific
+// uninstaller; we use a real stub script in a temp dir so
+// the test confirms the side-effect.
+func TestCommandLoop_KillSwitch_TriggersImmediateUninstall(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux-only kill switch test (handler invokes the Linux uninstaller)")
+	}
+	installDir := t.TempDir()
+	killSwitchPath := filepath.Join(installDir, "kill_switch")
+	mustWrite(t, killSwitchPath, "v1:opaque-token-32-bytes\n")
+	// The handler will try to run <installDir>/uninstall.sh;
+	// build a real stub that exits 0 and writes a sentinel
+	// file the test can read.
+	scriptPath := filepath.Join(installDir, "uninstall.sh")
+	mustWrite(t, scriptPath, "#!/bin/sh\ntouch /tmp/killswitch-fired\necho ok\n")
+	if err := os.Chmod(scriptPath, 0o755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	// Clean up the sentinel file from a prior test run.
+	os.Remove("/tmp/killswitch-fired")
+	defer os.Remove("/tmp/killswitch-fired")
+
+	doer := &recordingDoer{
+		// List would normally return a row; we want to
+		// confirm it's NEVER called when the kill switch
+		// fires (the loop short-circuits the BE poll).
+		listResp: mustListJSON(t, commands.Command{
+			CommandID: "ignored", ExecutorID: "exec-test",
+			CommandType: commands.CommandTypeUninstall,
+			IssuedAt: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour),
+		}),
+	}
+	cfg := Config{
+		HeartbeatIntervalSeconds: 1,
+		InstallDir:               installDir,
+		KillSwitchPath:           killSwitchPath,
+	}
+	loop := NewCommandLoop(cfg, doer, func() string { return "exec-test" }, "tenant-test", logrus.New())
+
+	loop.tick(context.Background())
+
+	// The kill switch should have short-circuited the BE
+	// poll. The list call counter is 0.
+	if doer.listCalls != 0 {
+		t.Fatalf("list called %d times, want 0 (kill switch should short-circuit the BE poll)", doer.listCalls)
+	}
+	// The uninstaller should have run. The stub wrote
+	// /tmp/killswitch-fired.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat("/tmp/killswitch-fired"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("uninstaller stub did not run within 3s of kill switch")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestCommandLoop_KillSwitch_MissingFile_NoOp confirms the
+// default (no kill switch file) is silent.
+func TestCommandLoop_KillSwitch_MissingFile_NoOp(t *testing.T) {
+	doer := &recordingDoer{
+		listResp: []byte(`{"executor_id":"exec-test","commands":[],"count":0}`),
+	}
+	cfg := Config{
+		HeartbeatIntervalSeconds: 1,
+		InstallDir:               t.TempDir(),
+		KillSwitchPath:           "/nonexistent/kill_switch",
+	}
+	loop := NewCommandLoop(cfg, doer, func() string { return "exec-test" }, "tenant-test", logrus.New())
+	loop.tick(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	if doer.listCalls != 1 {
+		t.Fatalf("list called %d times, want 1 (no kill switch file, normal poll)", doer.listCalls)
+	}
+}
+
+// TestCommandLoop_KillSwitch_BadPrefix_NoOp confirms the
+// sentinel format is enforced. A file with arbitrary
+// content (e.g. a stray "v0:" or a plain string) does NOT
+// trigger the kill switch.
+func TestCommandLoop_KillSwitch_BadPrefix_NoOp(t *testing.T) {
+	doer := &recordingDoer{
+		listResp: []byte(`{"executor_id":"exec-test","commands":[],"count":0}`),
+	}
+	installDir := t.TempDir()
+	killSwitchPath := filepath.Join(installDir, "kill_switch")
+	mustWrite(t, killSwitchPath, "v0:wrong-version\n")
+
+	cfg := Config{
+		HeartbeatIntervalSeconds: 1,
+		InstallDir:               installDir,
+		KillSwitchPath:           killSwitchPath,
+	}
+	loop := NewCommandLoop(cfg, doer, func() string { return "exec-test" }, "tenant-test", logrus.New())
+	loop.tick(context.Background())
+	time.Sleep(50 * time.Millisecond)
+	if doer.listCalls != 1 {
+		t.Fatalf("list called %d times, want 1 (bad prefix, normal poll)", doer.listCalls)
+	}
+}
+
 // TestCommandLoop_OneFlight_PreventsDoubleRun confirms the
 // dispatch guard. If two ticks fire while a handler is
 // still running, the second one drops the command instead

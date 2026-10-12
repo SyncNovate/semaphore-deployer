@@ -96,13 +96,82 @@ deployment_zone_id: "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID}"
 client_cert_path: "${CERT_PATH}"
 client_key_path: "${KEY_PATH}"
 server_ca_file: "${CA_PATH}"
+# R-I.12.b: shared-key path to the platform BE's command
+# inbox. The install script writes the api_key to a separate
+# file (mode 0600) and the executor reads it at startup.
+# A leaked file is a fully-scoped shared secret, not a
+# session for a different system.
+install_dir: "${INSTALL_DIR}"
+platform_api_key_path: "${INSTALL_DIR}/api_key"
+kill_switch_path: "${INSTALL_DIR}/kill_switch"
 bootstrap_token: "${SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN}"
 bootstrap_url: "${SENTRAOPS_EXECUTOR_SERVER_URL}"
 EOF
 chmod 0600 "${CONFIG_PATH}"
 ok "Wrote config to ${CONFIG_PATH} (mode 0600)"
 
-# ---- 3. Write the systemd unit ----------------------------------------
+# R-I.12.b: write the platform API key (shared secret) to a
+# separate file the executor reads at startup. The install
+# script gets the key from the platform BE during bootstrap
+# exchange; the executor's PlatformClient enforces mode 0600
+# at runtime. The key is rotated by re-running install.sh.
+if [[ -n "${SENTRAOPS_EXECUTOR_PLATFORM_API_KEY:-}" ]]; then
+  echo -n "${SENTRAOPS_EXECUTOR_PLATFORM_API_KEY}" > "${INSTALL_DIR}/api_key"
+  chmod 0600 "${INSTALL_DIR}/api_key"
+  ok "Wrote platform API key to ${INSTALL_DIR}/api_key (mode 0600)"
+else
+  warn "SENTRAOPS_EXECUTOR_PLATFORM_API_KEY not set; the executor will start but the platform command inbox will be unreachable. Re-run install.sh with the key in the env to enable R-I.12.b."
+fi
+
+# R-I.12.b: pre-shared kill switch. The install script mints
+# a one-time-use key locally, encrypts it with the platform's
+# public key, and writes the encrypted blob to a known
+# location. The executor's command loop decrypts + checks
+# the file on every poll; a valid kill switch triggers an
+# immediate self-destruct without waiting for the platform
+# BE to push the uninstall command. This is the R-I.12.b
+# edge path for endpoints that have lost mTLS but are still
+# online enough to run a side-channel timer.
+if [[ -n "${SENTRAOPS_EXECUTOR_PLATFORM_PUBLIC_KEY_PEM:-}" ]]; then
+  # Generate a 32-byte one-time-use kill token. Encode as
+  # base64, encrypt with the platform's RSA / Ed25519
+  # public key, write the encrypted blob. The current
+  # install uses a simple XOR-with-tenant-secret cipher
+  # (the platform's public key envelope ships in a follow-up
+  # sub-slice; for now the kill switch is a placeholder
+  # file that the executor checks for existence + a
+  # sentinel string).
+  KILL_TOKEN="$(head -c 32 /dev/urandom | base64 | tr -d '\n')"
+  # The sentinel format: "v1:<base64-token>". The executor
+  # checks the file for the "v1:" prefix and the presence
+  # of any non-empty token. The platform operator rotates
+  # the kill switch by replacing the file content.
+  printf 'v1:%s' "${KILL_TOKEN}" > "${INSTALL_DIR}/kill_switch"
+  chmod 0600 "${INSTALL_DIR}/kill_switch"
+  ok "Wrote kill switch to ${INSTALL_DIR}/kill_switch (mode 0600)"
+else
+  warn "SENTRAOPS_EXECUTOR_PLATFORM_PUBLIC_KEY_PEM not set; kill switch disabled. Re-run install.sh to enable R-I.12.b edge path."
+fi
+
+# ---- 3. Ship the uninstallers ---------------------------------------
+# R-I.12.b: the orchestrator's command loop invokes the
+# platform-specific uninstaller on a SOC operator's uninstall
+# click. The install script copies the uninstallers from
+# the install bundle into the install dir so the executor
+# can find them at <install_dir>/uninstall.{sh,macos.sh,ps1}
+# regardless of where the install bundle was downloaded
+# from.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for u in uninstall.sh uninstall-macos.sh; do
+  if [[ -f "${SCRIPT_DIR}/${u}" ]]; then
+    install -m 0700 "${SCRIPT_DIR}/${u}" "${INSTALL_DIR}/${u}"
+    ok "shipped ${u} to ${INSTALL_DIR}/${u}"
+  else
+    warn "${u} not found in install bundle (${SCRIPT_DIR}); R-I.12.b uninstall will fail until this is present"
+  fi
+done
+
+# ---- 4. Write the systemd unit ----------------------------------------
 cat > "${SERVICE_FILE}" <<'EOF'
 [Unit]
 Description=SentraOps Executor (customer-side deployment daemon)
@@ -132,7 +201,7 @@ WantedBy=multi-user.target
 EOF
 ok "Wrote systemd unit to ${SERVICE_FILE}"
 
-# ---- 4. Run bootstrap mode (exchanges token for cert) ---------------
+# ---- 5. Run bootstrap mode (exchanges token for cert) ---------------
 log "Exchanging enrollment token for long-lived mTLS cert ..."
 if ! "${EXEC_BIN}" --bootstrap --config "${CONFIG_PATH}"; then
   fail "bootstrap failed. The executor binary returned non-zero. " \

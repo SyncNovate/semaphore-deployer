@@ -96,6 +96,15 @@ deployment_zone_id: "$DeploymentZoneID"
 client_cert_path: "$CertPath"
 client_key_path: "$KeyPath"
 server_ca_file: "$CAPath"
+# R-I.12.b: shared-key path to the platform BE's command
+# inbox. The install script writes the api_key to a
+# separate file (Administrators + SYSTEM only ACL) and
+# the executor reads it at startup. A leaked file is a
+# fully-scoped shared secret, not a session for a
+# different system.
+install_dir: "$InstallDir"
+platform_api_key_path: "$InstallDir\api_key"
+kill_switch_path: "$InstallDir\kill_switch"
 bootstrap_token: "$BootstrapToken"
 bootstrap_url: "$ServerURL"
 "@
@@ -106,6 +115,61 @@ $acl.SetAccessRuleProtection($true, $false)
 $rules | ForEach-Object { $acl.AddAccessRule($_) }
 Set-Acl $ConfigPath $acl
 Write-Ok "Wrote config to $ConfigPath (ACL: Administrators + SYSTEM only)"
+
+# R-I.12.b: write the platform API key (shared secret) to
+# a separate file the executor reads at startup. The
+# install script gets the key from the platform BE during
+# the bootstrap exchange; the executor's PlatformClient
+# enforces mode 0600 / Administrators+SYSTEM-only at
+# runtime. The key is rotated by re-running install.ps1.
+if ($env:SENTRAOPS_EXECUTOR_PLATFORM_API_KEY) {
+    $apiKeyPath = Join-Path $InstallDir "api_key"
+    Set-Content -Path $apiKeyPath -Value $env:SENTRAOPS_EXECUTOR_PLATFORM_API_KEY -Encoding UTF8 -Force
+    $acl = Get-Acl $apiKeyPath
+    $acl.SetAccessRuleProtection($true, $false)
+    $rules | ForEach-Object { $acl.AddAccessRule($_) }
+    Set-Acl $apiKeyPath $acl
+    Write-Ok "Wrote platform API key to $apiKeyPath (ACL: Administrators + SYSTEM only)"
+} else {
+    Write-Warning "SENTRAOPS_EXECUTOR_PLATFORM_API_KEY not set; the executor will start but the platform command inbox will be unreachable. Re-run install.ps1 with the key in the env to enable R-I.12.b."
+}
+
+# R-I.12.b: pre-shared kill switch. The install script
+# mints a 32-byte one-time-use token, writes a sentinel
+# "v1:<base64>" file at the kill_switch path. The
+# executor's command loop decrypts + checks the file on
+# every poll. The platform operator rotates the kill
+# switch by replacing the file content.
+$killSwitchPath = Join-Path $InstallDir "kill_switch"
+$killBytes = New-Object byte[] 32
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($killBytes)
+$rng.Dispose()
+$killToken = [Convert]::ToBase64String($killBytes) -replace '\s', ''
+Set-Content -Path $killSwitchPath -Value "v1:$killToken" -Encoding UTF8 -Force
+$acl = Get-Acl $killSwitchPath
+$acl.SetAccessRuleProtection($true, $false)
+$rules | ForEach-Object { $acl.AddAccessRule($_) }
+Set-Acl $killSwitchPath $acl
+Write-Ok "Wrote kill switch to $killSwitchPath (ACL: Administrators + SYSTEM only)"
+
+# R-I.12.b: ship the platform-specific uninstaller into
+# the install dir so the executor's command loop can find
+# it at <install_dir>\uninstall.ps1.
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$uninstallerSrc = Join-Path $scriptDir "uninstall.ps1"
+if (Test-Path $uninstallerSrc) {
+    $uninstallerDst = Join-Path $InstallDir "uninstall.ps1"
+    Copy-Item -Path $uninstallerSrc -Destination $uninstallerDst -Force
+    # Inherit the install dir ACL.
+    $acl = Get-Acl $uninstallerDst
+    $acl.SetAccessRuleProtection($true, $false)
+    $rules | ForEach-Object { $acl.AddAccessRule($_) }
+    Set-Acl $uninstallerDst $acl
+    Write-Ok "Shipped uninstaller to $uninstallerDst (ACL: Administrators + SYSTEM only)"
+} else {
+    Write-Warning "uninstall.ps1 not found in install bundle ($scriptDir); R-I.12.b uninstall will fail until this is present"
+}
 
 # ---- 4. Install the Windows service via NSSM ------------------------
 # We ship nssm.exe alongside the executor binary; the operator

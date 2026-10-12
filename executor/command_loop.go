@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -168,6 +170,35 @@ func (l *CommandLoop) tick(ctx context.Context) {
 		// Registration hasn't finished yet. The next tick
 		// after a successful registration will pick up.
 		l.logger.Debug("executor/command_loop: tick skipped, executor_id not yet assigned")
+		return
+	}
+	// R-I.12.b edge path: kill switch check. The install
+	// script wrote a sentinel "v1:<base64-token>" file at
+	// the kill switch path. If the file exists + the
+	// content has the v1: prefix + any non-empty token,
+	// trigger an immediate self-destruct. This is the
+	// path for endpoints that have lost mTLS but are
+	// still online enough to run a side-channel timer.
+	if l.checkKillSwitch() {
+		l.logger.Warn("executor/command_loop: KILL SWITCH detected — triggering immediate uninstall")
+		// Synthesise a one-shot uninstall command + dispatch
+		// it. The handler runs the platform-specific
+		// uninstaller; we don't go through the BE inbox
+		// because the BE may be unreachable.
+		cmd := commands.Command{
+			CommandID:   "kill-switch-" + strconv.FormatInt(time.Now().UnixNano(), 10),
+			ExecutorID:  eid,
+			CommandType: commands.CommandTypeUninstall,
+			Payload:     map[string]interface{}{"reason": "kill switch activated"},
+			IssuedBy:    "local-kill-switch",
+			IssuedAt:    time.Now().UTC(),
+			ExpiresAt:   time.Now().UTC().Add(time.Hour),
+		}
+		l.dispatch(ctx, cmd)
+		// Don't continue the poll cycle — the dispatch
+		// goroutine is running the uninstaller, the
+		// endpoint is going silent. The list call would
+		// just confuse things.
 		return
 	}
 	rows, err := commands.NewClient(l.platform).ListPending(ctx, eid)
@@ -386,6 +417,40 @@ func (l *CommandLoop) uninstallerCommand(reason string) (string, []string, error
 	default:
 		return "", nil, fmt.Errorf("executor/command_loop: no uninstaller for GOOS=%q", runtime.GOOS)
 	}
+}
+
+// checkKillSwitch inspects the kill-switch file the install
+// script wrote. Returns true when the file exists + has the
+// "v1:" prefix + a non-empty token after the prefix. The
+// detection is intentionally simple — the install script
+// mints the token locally; the platform operator rotates it
+// by replacing the file content. (Full envelope encryption
+// with the platform's public key is a follow-up sub-slice;
+// the current sentinel format prevents a casual `rm -f`
+// bypass but is not a hardened one-time-use mechanism.)
+func (l *CommandLoop) checkKillSwitch() bool {
+	path := l.cfg.KillSwitchPath
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		// File doesn't exist or unreadable: not a kill
+		// switch event. The next tick will retry.
+		return false
+	}
+	s := string(data)
+	if !strings.HasPrefix(s, "v1:") {
+		return false
+	}
+	// v1: prefix is present + non-empty token after the
+	// prefix → kill switch is active. The exact token
+	// value doesn't matter for the sentinel check; the
+	// platform operator's rotation is the only way to
+	// unset the switch.
+	token := strings.TrimPrefix(s, "v1:")
+	token = strings.TrimSpace(token)
+	return token != ""
 }
 
 // defaultInstallDir is the platform default when the
