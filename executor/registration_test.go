@@ -122,7 +122,14 @@ func TestRegistrationAcceptsMissingZone(t *testing.T) {
 				gotZone = "<<absent>>"
 			}
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusCreated)
+		// Return a valid (empty) JSON object so the client's
+		// decode pass succeeds. The real server returns a
+		// populated object; the test only cares about the
+		// status + the absence of client-side validation on
+		// empty zone.
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer server.Close()
 	client := newTestHTTPClient(t, server)
