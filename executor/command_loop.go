@@ -90,7 +90,7 @@ type CommandHandler func(ctx context.Context, cmd commands.Command) AckOutcome
 // AckOutcome is what the handler returns. The loop turns
 // it into the wire shape via commands.Client.Ack.
 type AckOutcome struct {
-	Status  commands.CommandType // reuses the type for ack status constants
+	Status  string // commands.AckStatusSuccess / AckStatusError / AckStatusRejected
 	Message string
 }
 
