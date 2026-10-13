@@ -111,6 +111,18 @@ func TestInstallHandlerLinux(t *testing.T) {
 }
 
 // TestInstallHandlerWindows is the happy path on Windows.
+//
+// BUG-011 (2026-10-13): the served install.ps1 must NOT contain
+// any executable statement before the param() block, because
+// PowerShell 5.1 requires the script-level param() block to be
+// the first executable statement (env-var assignments before it
+// make the parser throw "Unexpected attribute 'CmdletBinding'"
+// and "Unexpected token 'param'"). The render function therefore
+// bakes the values directly into the param() defaults as
+// single-quoted literals. This test verifies both invariants:
+// (1) the param() block is the first executable statement, and
+// (2) the plaintext token + tenant + URL are present in the
+// body as literal defaults.
 func TestInstallHandlerWindows(t *testing.T) {
 	h, _ := newTestHandler()
 
@@ -122,14 +134,43 @@ func TestInstallHandlerWindows(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body = %q", rec.Code, rec.Body.String())
 	}
 	body := rec.Body.String()
-	if !strings.Contains(body, "$env:SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN") {
-		t.Errorf("ps1 body should set $env:BOOTSTRAP_TOKEN; got first 200: %q", body[:min(200, len(body))])
+	// The values are now baked into the param() defaults as
+	// single-quoted PowerShell literals, NOT as env-var reads.
+	if strings.Contains(body, "$env:SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN") ||
+		strings.Contains(body, "$env:SENTRAOPS_EXECUTOR_SERVER_URL") ||
+		strings.Contains(body, "$env:SENTRAOPS_EXECUTOR_TENANT_ID") {
+		t.Errorf("ps1 body must NOT contain $env:VAR reads (BUG-011: param() block must be first executable statement); got first 200: %q", body[:min(200, len(body))])
 	}
 	if !strings.Contains(body, testToken) {
 		t.Errorf("ps1 body should contain the plaintext token; got first 200: %q", body[:min(200, len(body))])
 	}
 	if !strings.Contains(body, testTenant) {
 		t.Errorf("ps1 body should contain the tenant id; got first 200: %q", body[:min(200, len(body))])
+	}
+	if !strings.Contains(body, testServerURL) {
+		t.Errorf("ps1 body should contain the server URL; got first 200: %q", body[:min(200, len(body))])
+	}
+	// The body must start with the BOM (EF BB BF) so PowerShell 5.1
+	// reads it as UTF-8 instead of Windows-1252.
+	if len(body) < 3 || body[0] != 0xEF || body[1] != 0xBB || body[2] != 0xBF {
+		t.Errorf("ps1 body must start with UTF-8 BOM (BUG-009); first 3 bytes: % x", []byte(body)[:min(3, len(body))])
+	}
+	// And the param() block must be the first executable statement
+	// after the BOM + comment header. We check that `[CmdletBinding()]`
+	// appears before any other executable line in the body.
+	noHeader := strings.TrimLeft(body, "\xef\xbb\xbf")
+	// Skip leading comment lines (start with '#')
+	firstNonComment := ""
+	for _, line := range strings.Split(noHeader, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		firstNonComment = trimmed
+		break
+	}
+	if firstNonComment != "[CmdletBinding()]" {
+		t.Errorf("first executable statement must be [CmdletBinding()] (BUG-011); got: %q", firstNonComment)
 	}
 	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/plain") {
 		t.Errorf("Content-Type = %q, want text/plain*", got)
@@ -321,12 +362,27 @@ func TestRenderBashSingleQuotesToken(t *testing.T) {
 
 // TestRenderPowerShellEscapesSingleQuotes verifies the PS
 // renderer escapes any single quote in the token by doubling
-// it. base64.RawURLEncoding does not include ' so this is
-// defence in depth.
+// it in the param() default literal. base64.RawURLEncoding
+// does not include ' so this is defence in depth. BUG-011:
+// the previous test asserted an env-var assignment shape that
+// is no longer produced — the value is now baked into the
+// param() block defaults.
 func TestRenderPowerShellEscapesSingleQuotes(t *testing.T) {
-	out := renderPowerShell("Write-Host hi", "abc'd", "https://x", "ORG")
-	if !strings.Contains(out, `$env:SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN = 'abc''d'`) {
-		t.Errorf("PS export should escape single quotes; got: %q", out)
+	// A minimal param block so the test exercises the substitution
+	// path with a real PowerShell param() shape, not just an
+	// arbitrary string.
+	template := "[CmdletBinding()]\nparam(\n    [string]$BootstrapToken = $env:SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN,\n    [string]$ServerURL      = $env:SENTRAOPS_EXECUTOR_SERVER_URL\n)\nWrite-Host hi\n"
+	out := renderPowerShell(template, "abc'd", "https://x", "ORG")
+	if !strings.Contains(out, "[string]$BootstrapToken = 'abc''d'") {
+		t.Errorf("PS param default should be a single-quoted literal with escaped quotes; got: %q", out)
+	}
+	if !strings.Contains(out, "[string]$ServerURL      = 'https://x'") {
+		t.Errorf("PS param default for ServerURL should be a single-quoted literal; got: %q", out)
+	}
+	// And the param() block must remain the first executable
+	// statement (no env-var assignments before it).
+	if strings.Contains(out, "$env:SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN") {
+		t.Errorf("BUG-011: rendered output must NOT contain $env:VAR reads; got: %q", out)
 	}
 }
 
@@ -362,5 +418,85 @@ func TestHashTokenDeterministic(t *testing.T) {
 	c := HashToken("hello!")
 	if a == c {
 		t.Error("HashToken(hello) == HashToken(hello!) — should differ")
+	}
+}
+
+// TestRenderPowerShellBUG011InstallEndToEnd exercises the full
+// install.ps1 template path (which is the actual file served in
+// production) and asserts the BUG-011 invariants: the served
+// file must start with a UTF-8 BOM, the param() block must be
+// the first executable statement, and the values must be baked
+// in as single-quoted PowerShell literals — NOT as env-var
+// reads. PowerShell 5.1's parser is strict about the first
+// executable statement; if this test ever fails, the live
+// Windows install will fail the same way.
+func TestRenderPowerShellBUG011InstallEndToEnd(t *testing.T) {
+	// Use the actual embedded install.ps1 template (go:embed).
+	// This catches regressions where the template is edited but
+	// the renderer is not updated, or vice versa.
+	if installScriptWindowsPowerShell == "" {
+		t.Fatal("embedded install.ps1 template is empty")
+	}
+	// Sanity: the embedded template itself must start with BOM.
+	if len(installScriptWindowsPowerShell) < 3 ||
+		installScriptWindowsPowerShell[0] != 0xEF ||
+		installScriptWindowsPowerShell[1] != 0xBB ||
+		installScriptWindowsPowerShell[2] != 0xBF {
+		t.Error("embedded install.ps1 must start with UTF-8 BOM (BUG-009); the source file should ship with the BOM")
+	}
+	// Sanity: the embedded template must have a [CmdletBinding()]
+	// / param() block.
+	if !strings.Contains(installScriptWindowsPowerShell, "[CmdletBinding()]") {
+		t.Error("embedded install.ps1 must have a [CmdletBinding()] attribute (R-D install script contract)")
+	}
+	if !strings.Contains(installScriptWindowsPowerShell, "param(") {
+		t.Error("embedded install.ps1 must have a param() block")
+	}
+
+	out := renderPowerShell(installScriptWindowsPowerShell, "tok123", "https://sentraops.example.com:9443", "ORG-ACME")
+
+	// Invariant 1: served output starts with BOM.
+	if len(out) < 3 || out[0] != 0xEF || out[1] != 0xBB || out[2] != 0xBF {
+		t.Error("rendered ps1 must start with UTF-8 BOM")
+	}
+	// Invariant 2: no env-var reads remain (BUG-011: those
+	// would force the param() block to be the second executable
+	// statement, which PowerShell 5.1 rejects).
+	for _, env := range []string{
+		"$env:SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN",
+		"$env:SENTRAOPS_EXECUTOR_SERVER_URL",
+		"$env:SENTRAOPS_EXECUTOR_TENANT_ID",
+		"$env:SENTRAOPS_EXECUTOR_BINARY_URL",
+	} {
+		if strings.Contains(out, env) {
+			t.Errorf("rendered ps1 must not contain %q (BUG-011); the values must be baked in as literals", env)
+		}
+	}
+	// Invariant 3: the param() block is the first executable
+	// statement. The header is comments only; the very first
+	// non-comment, non-blank line must be [CmdletBinding()].
+	body := strings.TrimPrefix(out, "\xef\xbb\xbf")
+	firstExec := ""
+	for _, line := range strings.Split(body, "\n") {
+		trimmed := strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		firstExec = trimmed
+		break
+	}
+	if firstExec != "[CmdletBinding()]" {
+		t.Errorf("first executable statement must be [CmdletBinding()] (BUG-011); got: %q", firstExec)
+	}
+	// Invariant 4: the baked-in literal token / URL / tenant
+	// appear in the param() defaults.
+	if !strings.Contains(out, "[string]$BootstrapToken = 'tok123'") {
+		t.Error("BootstrapToken default must be baked in as 'tok123'")
+	}
+	if !strings.Contains(out, "[string]$ServerURL      = 'https://sentraops.example.com:9443'") {
+		t.Error("ServerURL default must be baked in as the server URL")
+	}
+	if !strings.Contains(out, "[string]$TenantID       = 'ORG-ACME'") {
+		t.Error("TenantID default must be baked in as the tenant ID")
 	}
 }
