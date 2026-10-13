@@ -94,13 +94,6 @@ server_url: "${SENTRAOPS_EXECUTOR_SERVER_URL}"
 tenant_id: "${SENTRAOPS_EXECUTOR_TENANT_ID}"
 EOF
 
-# Per-customer installs do not bind a zone. Forward the env var
-# if the operator sets it; otherwise omit the line so the
-# executor's config validate() accepts the file.
-if [[ -n "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID:-}" ]]; then
-  printf 'deployment_zone_id: "%s"\n' "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID}" >> "${CONFIG_PATH}"
-fi
-
 cat >> "${CONFIG_PATH}" <<EOF
 client_cert_path: "${CERT_PATH}"
 client_key_path: "${KEY_PATH}"
@@ -237,13 +230,4 @@ log "Config + cert live at:"
 log "  ${INSTALL_DIR}/"
 log ""
 log "Tenant: ${SENTRAOPS_EXECUTOR_TENANT_ID}"
-# Per-customer installs do not bind a zone. Print the zone
-# only if the operator still sets the env var (legacy bundles
-# or future per-machine zones). Falls back to "(none)" so the
-# report stays consistent.
-if [[ -n "${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID:-}" ]]; then
-  log "Zone:   ${SENTRAOPS_EXECUTOR_DEPLOYMENT_ZONE_ID}"
-else
-  log "Zone:   (none — per-customer install)"
-fi
 log "Server: ${SENTRAOPS_EXECUTOR_SERVER_URL}"
