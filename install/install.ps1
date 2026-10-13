@@ -49,29 +49,22 @@ param(
     [string]$TenantID       = $env:SENTRAOPS_EXECUTOR_TENANT_ID,
     [string]$BinaryURL      = $env:SENTRAOPS_EXECUTOR_BINARY_URL,
     [string]$InstallDir     = "${env:ProgramData}\SentraOps\Executor",
-    # The remaining paths are derived from $InstallDir; the
-    # default values are set in the script body (see BUG-010
-    # comment) so the PowerShell 5.1 parser doesn't reject
-    # a default that references an earlier parameter.
-    [string]$BinaryPath     = "",
-    [string]$ConfigPath     = "",
-    [string]$CertPath       = "",
-    [string]$KeyPath        = "",
-    [string]$CAPath         = "",
     [string]$ServiceName    = "SentraOpsExecutor"
 )
 
 # BUG-010 (2026-10-13): PowerShell 5.1's parser rejects parameter
-# default values that reference earlier parameters in the same
-# `param()` block. Move the derived-path defaults to the body so
-# the parser sees simple string literals in the param block. The
-# body below resolves the rest of the paths now that $InstallDir
-# is set.
-if (-not $BinaryPath)  { $BinaryPath  = Join-Path $InstallDir "sentraops-executor.exe" }
-if (-not $ConfigPath)  { $ConfigPath  = Join-Path $InstallDir "config.yaml" }
-if (-not $CertPath)    { $CertPath    = Join-Path $InstallDir "cert.pem" }
-if (-not $KeyPath)     { $KeyPath     = Join-Path $InstallDir "key.pem" }
-if (-not $CAPath)      { $CAPath      = Join-Path $InstallDir "ca.pem" }
+# default values in a script-level `param()` block (both
+# cross-param references like ``$BinaryPath = "$InstallDir\..."``
+# AND empty-string defaults like ``$BinaryPath = ""``). The
+# fix: keep the param block free of complex defaults, and
+# derive everything from $InstallDir in the body. The body
+# runs once at script load, so the local variables below
+# are set before any other code uses them.
+$BinaryPath  = Join-Path $InstallDir "sentraops-executor.exe"
+$ConfigPath  = Join-Path $InstallDir "config.yaml"
+$CertPath    = Join-Path $InstallDir "cert.pem"
+$KeyPath     = Join-Path $InstallDir "key.pem"
+$CAPath      = Join-Path $InstallDir "ca.pem"
 
 $ErrorActionPreference = "Stop"
 
