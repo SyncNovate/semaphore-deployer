@@ -221,7 +221,24 @@ func renderPowerShell(template, token, serverURL, tenantID string) string {
 		fmt.Sprintf("$env:SENTRAOPS_EXECUTOR_TENANT_ID = '%s'", esc(tenantID)),
 		"",
 	}, "\r\n")
-	return header + template
+	// BUG-009 (2026-10-13): PowerShell 5.1 on Windows 10/11/Server
+	// reads files without a BOM using the system code page
+	// (Windows-1252 by default). install.ps1 contains multi-byte
+	// UTF-8 characters (em-dash U+2014, check mark U+2713), which
+	// Windows-1252 reinterprets as different code points, breaking
+	// the parser on the function-definition line that uses the
+	// check mark. Prepending a UTF-8 BOM (EF BB BF) here is
+	// essential — the Wazuh-style 1-line install is
+	// `iex (irm '...?os=windows')` and the BOM must be the FIRST
+	// bytes of the file for PowerShell 5.1 to detect UTF-8. The
+	// template also has the BOM (install/install.ps1 ships with
+	// it) so we strip any leading BOM from the template before
+	// prepending our own — otherwise the customer would see the
+	// BOM, then a blank line, then the header, then the BOM again.
+	// The cleanest invariant is "the served file starts with one
+	// BOM, then the header, then the body without a leading BOM".
+	template = strings.TrimPrefix(template, "\xef\xbb\xbf")
+	return "\xef\xbb\xbf" + header + template
 }
 
 // HashToken returns the SHA-256 hex digest of a plaintext
