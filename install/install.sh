@@ -166,13 +166,23 @@ fi
 # the install dir so the executor can find them at
 # <install_dir>/uninstall.{sh,macos.sh,ps1} regardless of
 # where the install bundle was downloaded from.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+#
+# BASH_SOURCE[0] is only set when the script is run from a file
+# (e.g. `bash install.sh` or `./install.sh`). When the script is
+# piped from stdin — the Wazuh-style 1-line pattern `curl ... | sudo bash`
+# — BASH_SOURCE is empty, so the install-bundle lookup is impossible.
+# We detect that case and warn instead of dying on set -u.
+if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  SCRIPT_DIR=""
+fi
 for u in uninstall.sh uninstall-macos.sh; do
-  if [[ -f "${SCRIPT_DIR}/${u}" ]]; then
+  if [[ -n "${SCRIPT_DIR}" && -f "${SCRIPT_DIR}/${u}" ]]; then
     install -m 0700 "${SCRIPT_DIR}/${u}" "${INSTALL_DIR}/${u}"
     ok "shipped ${u} to ${INSTALL_DIR}/${u}"
   else
-    warn "${u} not found in install bundle (${SCRIPT_DIR}); uninstall will fail until this is present"
+    warn "${u} not in install bundle (script was piped from stdin); executor will fall back to its built-in uninstall path"
   fi
 done
 
