@@ -1,4 +1,4 @@
-# install.ps1 — SentraOps executor first-boot installer (Windows)
+﻿# install.ps1 — SentraOps executor first-boot installer (Windows)
 #
 # This script is what the customer's IT admin runs in an elevated
 # PowerShell after clicking the "Send Executor" link in the SOC
