@@ -47,6 +47,11 @@ fi
 log() { printf '%s\n' "$*" >&2; }
 fail() { log "${RED}ERROR:${RST} $*"; exit 1; }
 ok() { log "${GRN}✓${RST} $*"; }
+# warn is the soft cousin of fail: it prints a yellow WARN prefix
+# and continues. Used when an optional feature (api key, kill
+# switch, uninstaller) is missing but the install can still
+# proceed.
+warn() { log "${YEL}WARN:${RST} $*"; }
 
 # Required input.
 : "${SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN:?missing SENTRAOPS_EXECUTOR_BOOTSTRAP_TOKEN}"
